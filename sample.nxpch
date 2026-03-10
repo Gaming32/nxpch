@@ -57,11 +57,10 @@ user_settings = [
 0x0088CEBC = ldr w0, [x19, 0x358] // Game::Player->int mIsControlled
 0x0088CEC0 = cbz w0, 0xc
 0x0088CEC8 = b 0xc
+0x0088CECC = mov w0, MAX_HEALTH
 0x0088CED4 = mov w0, 1000
 // Game::SeqMgrMission::receiveCheckPoint_
 0x00816560 = nop
-// Game::Player::calcDamage
-0x0088CECC = mov w0, MAX_HEALTH
 
 #ifdef ARMOR_DISABLE
 // Game::ItemArmor::gotByPlayer_
