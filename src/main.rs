@@ -1,7 +1,7 @@
 use crate::parse::PreParsedCode;
 use clap::{Parser, Subcommand};
 use clap_stdin::FileOrStdin;
-use miette::{Diagnostic, GraphicalReportHandler, NamedSource, Severity};
+use miette::{Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity};
 use std::process;
 use std::sync::Arc;
 
@@ -31,7 +31,10 @@ fn main() -> miette::Result<()> {
     match args.command {
         Commands::Build { source } => {
             let filename = source.filename().to_string();
-            let raw_source = source.contents().unwrap(); // TODO: Use ?
+            let raw_source = source
+                .contents()
+                .into_diagnostic()
+                .with_context(|| format!("File {filename}"))?;
             let pre_parsed = PreParsedCode::parse(&raw_source);
             let build_failure_count = pre_parsed
                 .diagnostics
