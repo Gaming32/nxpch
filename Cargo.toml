@@ -1,0 +1,21 @@
+[package]
+name = "nxpch"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+asm-rs = { version = "0.1.1", default-features = false, features = ["std", "aarch64"] }
+clap = { version = "4.5.60", features = ["derive"] }
+clap-stdin = "0.8.1"
+ere = "0.2.4"
+json5 = "1.3.1"
+json5_nodes = "2.0.2"
+miette = { version = "7.6.0", features = ["derive", "fancy", "serde"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_with = "3.17.0"
+strsim = "0.11.1"
+subslice-offset = "0.1.1"
+thiserror = "2.0.18"
+
+[dev-dependencies]
+pretty_assertions = "1.4.1"
