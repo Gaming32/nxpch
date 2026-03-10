@@ -1,0 +1,73 @@
+// Everything Hurts 2
+
+pointer_offset = 0x100
+
+target_build = 0xF18FF3CFCBAD0884D72ABBEB6C540D6B
+
+user_settings = [
+	// Difficulties
+	{
+		layer: 0,
+		name: 'Hard (10 HP)',
+		defines: ['MAX_HEALTH 100'],
+	},
+	{
+		layer: 0,
+		name: 'Extreme (0.1 HP)',
+		defines: ['MAX_HEALTH 1'],
+	},
+	{
+		layer: 0,
+		name: 'Easy (30 HP)',
+		defines: ['MAX_HEALTH 300'],
+	},
+	{
+		layer: 0,
+		name: 'Very Easy (50 HP)',
+		defines: ['MAX_HEALTH 500'],
+	},
+	// Armor behaviors
+	{
+		layer: 1,
+		name: 'Disable Armor',
+		defines: ['ARMOR_DISABLE'],
+	},
+	{
+		layer: 1,
+		name: 'Lethal Armor',
+		defines: ['ARMOR_LETHAL'],
+	},
+	{
+		layer: 1,
+		name: 'Extra Hit (Vanilla)',
+	},
+]
+
+// Cmn::Def::Mission::getArmorLevelMax
+0x00083300 = mov w0, #2
+// Cmn::Def::Mission::getArmorLevelInitial
+0x00083308 = mov w0, #0
+// Cmn::Def::Mission::useDeviledArmor
+0x00083310 = mov w0, #0
+// Cmn::Def::Mission::isRecoverArmorLevelZero
+0x00083320 = mov w0, #0
+// Game::EnemyLastKing::endDemo
+0x004DE190 = nop
+// Game::Player::calcDamage
+0x0088CEBC = ldr w0, [x19, #0x358] // (Game::Player->int mIsControlled)
+0x0088CEC0 = cbz w0, #0xc
+0x0088CEC8 = b #0xc // TODO: Add label
+0x0088CED4 = mov w0, #1000
+// Game::SeqMgrMission::receiveCheckPoint_
+0x00816560 = nop
+// Game::Player::calcDamage
+0x0088CECC = mov w0, #MAX_HEALTH
+
+#ifdef ARMOR_DISABLE
+// Game::ItemArmor::gotByPlayer_
+0x0064E638 = ret
+#elifdef ARMOR_LETHAL
+// Game::Player::gotByPlayer_
+0x0064E638 = ldr x0, [x1, #0xdb0] // (Game::Player->Game::PlayerTrouble *mPlayerTrouble)
+0x0064E63C = b #0x32022c // (Game::PlayerTrouble::informDamageFull_Sender) // TODO: Add label
+#endif
