@@ -44,30 +44,32 @@ user_settings = [
 ]
 
 // Cmn::Def::Mission::getArmorLevelMax
-0x00083300 = mov w0, #2
+0x00083300 = mov w0, 2
 // Cmn::Def::Mission::getArmorLevelInitial
-0x00083308 = mov w0, #0
+0x00083308 = mov w0, 0
 // Cmn::Def::Mission::useDeviledArmor
-0x00083310 = mov w0, #0
+0x00083310 = mov w0, 0
 // Cmn::Def::Mission::isRecoverArmorLevelZero
-0x00083320 = mov w0, #0
+0x00083320 = mov w0, 0
 // Game::EnemyLastKing::endDemo
 0x004DE190 = nop
 // Game::Player::calcDamage
-0x0088CEBC = ldr w0, [x19, #0x358] // (Game::Player->int mIsControlled)
-0x0088CEC0 = cbz w0, #0xc
-0x0088CEC8 = b #0xc // TODO: Add label
-0x0088CED4 = mov w0, #1000
+0x0088CEBC = ldr w0, [x19, 0x358] // Game::Player->int mIsControlled
+0x0088CEC0 = cbz w0, 0xc
+0x0088CEC8 = b 0xc
+0x0088CED4 = mov w0, 1000
 // Game::SeqMgrMission::receiveCheckPoint_
 0x00816560 = nop
 // Game::Player::calcDamage
-0x0088CECC = mov w0, #MAX_HEALTH
+0x0088CECC = mov w0, MAX_HEALTH
 
 #ifdef ARMOR_DISABLE
 // Game::ItemArmor::gotByPlayer_
 0x0064E638 = ret
 #elifdef ARMOR_LETHAL
 // Game::Player::gotByPlayer_
-0x0064E638 = ldr x0, [x1, #0xdb0] // (Game::Player->Game::PlayerTrouble *mPlayerTrouble)
-0x0064E63C = b #0x32022c // (Game::PlayerTrouble::informDamageFull_Sender) // TODO: Add label
+0x0064E638 = ldr x0, [x1, 0xdb0] // Game::Player->Game::PlayerTrouble *mPlayerTrouble
+0x0064E63C = b informDamageFull_Sender
 #endif
+
+0x0096E868 = informDamageFull_Sender: // Game::PlayerTrouble::informDamageFull_Sender
