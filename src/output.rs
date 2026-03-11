@@ -152,17 +152,14 @@ pub fn generate_pchtxt(
         str::from_utf8(hunk).is_ok().then_some(len)
     }
 
+    #[inline]
     fn hunk_len_as_bytes(hunk: &[u8]) -> usize {
         hunk.len() * 2
     }
 
-    fn addr_penalty_len(addr: u32) -> usize {
-        addr.checked_ilog(16).unwrap_or_default() as usize + 3
-    }
-
     let mut scratch = String::new();
 
-    writeln!(output, "@nsobid-{build_id:X}")?;
+    writeln!(output, "@nsobid-{build_id:032X}")?;
     writeln!(output, "@enabled")?;
     for (mut addr, hunk) in vec.iter_hunks(4080) {
         let mut sub_hunks = hunk
@@ -188,18 +185,16 @@ pub fn generate_pchtxt(
                 }
             })
             .collect::<SmallVec<[_; 2]>>();
+
         let mut hunk_idx = 0;
-        let mut current_addr = addr;
         while hunk_idx < sub_hunks.len() - 1 {
             let (sub_hunk, Some(len_as_string)) = sub_hunks[hunk_idx] else {
                 hunk_idx += 1;
-                current_addr += hunk.len() as u32;
                 continue;
             };
             let (next_sub_hunk, next_len_as_string) = sub_hunks[hunk_idx + 1];
-            let total_len_if_alone = len_as_string
-                + addr_penalty_len(current_addr + sub_hunk.len() as u32)
-                + next_len_as_string.unwrap_or(hunk_len_as_bytes(next_sub_hunk));
+            let total_len_if_alone =
+                len_as_string + 10 + next_len_as_string.unwrap_or(hunk_len_as_bytes(next_sub_hunk));
             let total_len_if_joined =
                 hunk_len_as_bytes(sub_hunk) + hunk_len_as_bytes(next_sub_hunk);
             if total_len_if_joined < total_len_if_alone {
@@ -220,7 +215,7 @@ pub fn generate_pchtxt(
         }
 
         for (sub_hunk, len_as_string) in sub_hunks {
-            let _ = write!(scratch, "{addr:X} ");
+            let _ = write!(scratch, "{addr:08X} ");
             if len_as_string.is_some() {
                 scratch.push('"');
                 for char in all_but_last_assert(str::from_utf8(sub_hunk).unwrap().chars(), '\0') {
@@ -477,9 +472,12 @@ mod test {
             generate_pchtxt(&generate_patch_vec(patches), 0, &mut result).unwrap();
 
             let mut str = String::from_utf8(result).unwrap();
-            assert_eq!(&str[..18], "@nsobid-0\n@enabled");
+            assert_eq!(
+                &str[..49],
+                "@nsobid-00000000000000000000000000000000\n@enabled",
+            );
             assert_eq!(&str[str.len() - 1..], "\n");
-            str.drain(..18);
+            str.drain(..49);
             str.drain(str.len() - 1..);
             str
         }
@@ -487,12 +485,12 @@ mod test {
         assert_eq!(
             generate(&[(0, &[50])]),
             r#"
-0 32"#
+00000000 32"#
         );
         assert_eq!(
             generate(&[(50, "Hello!\0".as_bytes())]),
             r#"
-32 "Hello!""#
+00000032 "Hello!""#
         );
         assert_eq!(
             generate(&[
@@ -500,8 +498,8 @@ mod test {
                 (57, "Multi\nline\nstring\twith\ttabs\0".as_bytes()),
             ]),
             r#"
-32 "Hello!"
-39 "Multi\nline\nstring\twith\ttabs""#
+00000032 "Hello!"
+00000039 "Multi\nline\nstring\twith\ttabs""#
         );
         assert_eq!(
             generate(&[
@@ -510,9 +508,8 @@ mod test {
                 (59, "Multi\nline\nstring\twith\ttabs\0".as_bytes()),
             ]),
             r#"
-32 "Hello!"
-39 0A14
-3B "Multi\nline\nstring\twith\ttabs""#
+00000032 48656C6C6F21000A14
+0000003B "Multi\nline\nstring\twith\ttabs""#
         );
     }
 
