@@ -1,6 +1,7 @@
 use crate::option::BuildId;
 use crate::utils::all_but_last_assert;
 use itertools::Itertools;
+use miette::Diagnostic;
 use smallvec::{SmallVec, smallvec};
 use std::collections::{BTreeMap, btree_map};
 use std::fmt::Write as FmtWrite;
@@ -184,17 +185,15 @@ pub fn generate_pchtxt(
                     smallvec![(h, len_as_str)]
                 }
             })
-            .collect::<SmallVec<[_; 2]>>();
+            .collect::<SmallVec<[_; 4]>>();
 
         let mut hunk_idx = 0;
         while hunk_idx < sub_hunks.len() - 1 {
-            let (sub_hunk, Some(len_as_string)) = sub_hunks[hunk_idx] else {
-                hunk_idx += 1;
-                continue;
-            };
+            let (sub_hunk, len_as_string) = sub_hunks[hunk_idx];
             let (next_sub_hunk, next_len_as_string) = sub_hunks[hunk_idx + 1];
-            let total_len_if_alone =
-                len_as_string + 10 + next_len_as_string.unwrap_or(hunk_len_as_bytes(next_sub_hunk));
+            let total_len_if_alone = len_as_string.unwrap_or(hunk_len_as_bytes(sub_hunk))
+                + 10
+                + next_len_as_string.unwrap_or(hunk_len_as_bytes(next_sub_hunk));
             let total_len_if_joined =
                 hunk_len_as_bytes(sub_hunk) + hunk_len_as_bytes(next_sub_hunk);
             if total_len_if_joined < total_len_if_alone {
@@ -229,11 +228,8 @@ pub fn generate_pchtxt(
                         '\x0B' => scratch.push_str(r"\v"),
                         '\\' => scratch.push_str(r"\\"),
                         '"' => scratch.push_str(r#"\""#),
-                        _ => {
-                            assert!(!char.is_ascii_control());
-                            scratch.push(char);
-                        }
-                    };
+                        _ => scratch.push(char),
+                    }
                 }
                 scratch.push('"');
             } else {
@@ -411,13 +407,16 @@ pub fn generate_ips(vec: &PatchVec, mut output: impl Write) -> Result<(), IpsGen
     Ok(())
 }
 
-#[derive(Debug, Error)]
+#[derive(Debug, Diagnostic, Error)]
 pub enum IpsGenerateError {
     #[error("IPS Patch with hunk starting at address 0x454F46 cannot be written")]
+    #[diagnostic(code(ips::eof_hunk))]
     HasEofHunk,
     #[error("IPS Patch with hunks starting past address 0xFFFFFF cannot be written")]
+    #[diagnostic(code(ips::too_long))]
     TooLong,
     #[error(transparent)]
+    #[diagnostic(code(ips::io))]
     Io(#[from] io::Error),
 }
 
@@ -620,7 +619,7 @@ mod test {
         assert_eq!(
             generate(&[(0x444F47, &[18; 0x10010])]),
             &[
-                0x44, 0x4F, 0x47, 0, 0, 0xFF, 0xFE, 18, 
+                0x44, 0x4F, 0x47, 0, 0, 0xFF, 0xFE, 18,
                 0x45, 0x4F, 0x45, 0, 0, 0x00, 0x12, 18,
             ],
         );
