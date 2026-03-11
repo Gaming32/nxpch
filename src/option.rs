@@ -11,6 +11,7 @@ pub enum NxpchOption {
     TargetBuilds(TargetBuildsOption),
     PointerOffset(PointerOffsetOption),
     UserSettings(UserSettingsOption),
+    OutputFormat(OutputFormatOption),
 }
 
 impl NxpchOption {
@@ -20,6 +21,7 @@ impl NxpchOption {
             "target_builds" => NxpchOption::TargetBuilds(json5::from_str(content)?),
             "pointer_offset" => NxpchOption::PointerOffset(json5::from_str(content)?),
             "user_settings" => NxpchOption::UserSettings(json5::from_str(content)?),
+            "output_format" => NxpchOption::OutputFormat(json5::from_str(content)?),
             _ => {
                 return Err(OptionParseError::UnknownOption {
                     closest: [
@@ -27,6 +29,7 @@ impl NxpchOption {
                         "target_builds",
                         "pointer_offset",
                         "user_settings",
+                        "output_format",
                     ]
                     .into_iter()
                     .min_by_key(|x| damerau_levenshtein(x, option_name))
@@ -106,6 +109,7 @@ impl NxpchOption {
                     }
                 }
             }
+            Self::OutputFormat(_) => {}
         }
     }
 }
@@ -144,4 +148,14 @@ pub struct UserSetting {
     pub name: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub defines: Vec<MacroDefine>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct OutputFormatOption(OutputFormat);
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputFormat {
+    Ips,
+    Pchtxt,
 }
