@@ -8,7 +8,6 @@ use std::fmt::Write as FmtWrite;
 use std::io;
 use std::io::Write;
 use std::iter::{FusedIterator, Peekable};
-use std::ops::RangeBounds;
 use subslice_offset::SubsliceOffset;
 use thiserror::Error;
 
@@ -49,51 +48,10 @@ impl PatchVec {
             .is_some_and(|(&first_addr, _)| first_addr == address)
     }
 
-    pub fn has_hunk_starting_after(&self, address: u32, max_hunk_size: u32) -> bool {
-        if address == u32::MAX {
-            return false;
-        }
-        match self.data.range(address + 1..).next() {
-            // If addr starts at address, check
-            Some((&addr, _)) if addr == address + 1 && max_hunk_size > 1 => {
-                if self.data.range(address + max_hunk_size..).next().is_some() {
-                    // If an element exists past the end of the maximum extended hunk size, then
-                    // it can't be part of the trailing hunk, and thus starts after.
-                    return true;
-                }
-                let mut inner_iter = self.data.range(address..address + max_hunk_size);
-                // unwrap() is safe because we know that there's at least one element, the one at addr
-                if *inner_iter.next().unwrap().0 != address {
-                    // If there's no active hunk at address, then the hunk at addr must be the start
-                    // of a hunk.
-                    return true;
-                }
-                let contiguous_hunk = inner_iter
-                    .tuple_windows()
-                    .all(|((&addr_a, _), (&addr_b, _))| addr_b == addr_a + 1);
-                !contiguous_hunk
-            }
-            Some(_) => true,
-            None => false,
-        }
-    }
-
     pub fn iter_hunks(&self, max_hunk_size: u32) -> HunksIterator<btree_map::Iter<'_, u32, u8>> {
         assert!(max_hunk_size > 0, "max_hunk_size cannot be 0");
         HunksIterator {
             inner: self.data.iter().peekable(),
-            max_size: max_hunk_size,
-        }
-    }
-
-    pub fn iter_hunks_in_range(
-        &self,
-        range: impl RangeBounds<u32>,
-        max_hunk_size: u32,
-    ) -> HunksIterator<btree_map::Range<'_, u32, u8>> {
-        assert!(max_hunk_size > 0, "max_hunk_size cannot be 0");
-        HunksIterator {
-            inner: self.data.range(range).peekable(),
             max_size: max_hunk_size,
         }
     }
@@ -246,16 +204,14 @@ pub fn generate_pchtxt(
 }
 
 /// Returns whether the patch was written. If the patch contains a hunk starting at address
-/// `0x454F46` or past address `0xFFFFFF`, it cannot be written.
+/// `0x45454F46`, it cannot be written.
 pub fn generate_ips(vec: &PatchVec, mut output: impl Write) -> Result<(), IpsGenerateError> {
-    const UNSAFE_OFFSET: u32 = 0x454F46;
-    const MAX_OFFSET: u32 = 0xFFFFFF;
+    const UNSAFE_OFFSET: u32 = 0x45454F46;
     const MAX_HUNK_SIZE: u32 = 0xFFFF;
 
     #[inline]
     fn encode_hunk_offset(offset: u32, output: &mut impl Write) -> io::Result<()> {
-        assert!(offset <= MAX_OFFSET);
-        output.write_all(&offset.to_be_bytes()[1..])
+        output.write_all(&offset.to_be_bytes())
     }
 
     #[inline]
@@ -290,20 +246,11 @@ pub fn generate_ips(vec: &PatchVec, mut output: impl Write) -> Result<(), IpsGen
     if vec.has_hunk_starting_at(UNSAFE_OFFSET) {
         return Err(IpsGenerateError::HasEofHunk);
     }
-    if vec.has_hunk_starting_after(MAX_OFFSET, MAX_HUNK_SIZE) {
-        return Err(IpsGenerateError::TooLong);
-    }
 
-    output.write_all(b"PATCH")?;
-    let has_extended_hunk = vec.has_edit_at(MAX_OFFSET + 1);
+    output.write_all(b"IPS32")?;
     let has_edit_at_unsafe_offset = vec.has_edit_at(UNSAFE_OFFSET);
-    let base_iter = if has_extended_hunk {
-        vec.iter_hunks_in_range(..MAX_OFFSET, MAX_HUNK_SIZE)
-    } else {
-        vec.iter_hunks_in_range(.., MAX_HUNK_SIZE)
-    };
     let mut safety_byte = None;
-    for (mut addr, mut hunk) in base_iter {
+    for (mut addr, mut hunk) in vec.iter_hunks(MAX_HUNK_SIZE) {
         let extra_byte = if has_edit_at_unsafe_offset {
             if addr + hunk.len() as u32 == UNSAFE_OFFSET {
                 assert!(safety_byte.is_none());
@@ -333,25 +280,25 @@ pub fn generate_ips(vec: &PatchVec, mut output: impl Write) -> Result<(), IpsGen
         } else if hunk.iter().all_equal() {
             encode_rle_hunk(addr, hunk[0], hunk.len(), &mut output)?;
             addr += hunk.len() as u32;
-        } else if hunk.len() <= 13 {
+        } else if hunk.len() <= 14 {
             encode_standard_hunk(addr, &hunk, &mut output)?;
             addr += hunk.len() as u32;
         } else {
             let mut hunk = hunk.as_slice();
-            if hunk[..9].iter().all_equal() {
+            if hunk[..10].iter().all_equal() {
                 let value = hunk[0];
-                let first_unequal = hunk[9..]
+                let first_unequal = hunk[10..]
                     .iter()
                     .position(|&x| x != value)
-                    .map_or(hunk.len(), |x| x + 9);
+                    .map_or(hunk.len(), |x| x + 10);
                 encode_rle_hunk(addr, value, first_unequal, &mut output)?;
                 addr += first_unequal as u32;
                 hunk = &hunk[first_unequal..];
             }
             let mut finishing_hunk = None;
-            if hunk.len() >= 9 && hunk[hunk.len() - 9..].iter().all_equal() {
+            if hunk.len() >= 10 && hunk[hunk.len() - 10..].iter().all_equal() {
                 let value = hunk[hunk.len() - 1];
-                let last_equal = hunk[..hunk.len() - 9]
+                let last_equal = hunk[..hunk.len() - 10]
                     .iter()
                     .rposition(|&x| x != value)
                     .map_or(0, |x| x + 1);
@@ -360,7 +307,7 @@ pub fn generate_ips(vec: &PatchVec, mut output: impl Write) -> Result<(), IpsGen
             }
             while !hunk.is_empty() {
                 let Some(next_rle_group) = hunk
-                    .array_windows::<13>()
+                    .array_windows::<15>()
                     .position(|a| a.iter().all_equal())
                 else {
                     encode_standard_hunk(addr, hunk, &mut output)?;
@@ -372,10 +319,10 @@ pub fn generate_ips(vec: &PatchVec, mut output: impl Write) -> Result<(), IpsGen
                 addr += next_rle_group as u32;
                 hunk = &hunk[next_rle_group..];
                 let value = hunk[0];
-                let first_unequal = hunk[13..]
+                let first_unequal = hunk[15..]
                     .iter()
                     .position(|&x| x != value)
-                    .map_or(hunk.len(), |x| x + 13);
+                    .map_or(hunk.len(), |x| x + 15);
                 encode_rle_hunk(addr, value, first_unequal, &mut output)?;
                 addr += first_unequal as u32;
                 hunk = &hunk[first_unequal..];
@@ -389,32 +336,15 @@ pub fn generate_ips(vec: &PatchVec, mut output: impl Write) -> Result<(), IpsGen
             encode_standard_hunk(addr, &[byte], &mut output)?;
         }
     }
-    if has_extended_hunk {
-        let mut iter = vec.iter_hunks_in_range(MAX_OFFSET.., MAX_HUNK_SIZE);
-        let (hunk_offset, hunk) = iter.next().expect("an extended hunk should be present");
-        assert_eq!(hunk_offset, MAX_OFFSET);
-        if hunk.len() > 3 && hunk.iter().all_equal() {
-            encode_rle_hunk(hunk_offset, hunk[0], hunk.len(), &mut output)?;
-        } else {
-            encode_standard_hunk(hunk_offset, &hunk, &mut output)?;
-        }
-        assert!(
-            iter.next().is_none(),
-            "there should not be multiple extended hunks",
-        );
-    }
-    output.write_all(b"EOF")?;
+    output.write_all(b"EEOF")?;
     Ok(())
 }
 
 #[derive(Debug, Diagnostic, Error)]
 pub enum IpsGenerateError {
-    #[error("IPS Patch with hunk starting at address 0x454F46 cannot be written")]
+    #[error("IPS Patch with hunk starting at address 0x45454F46 cannot be written")]
     #[diagnostic(code(ips::eof_hunk))]
     HasEofHunk,
-    #[error("IPS Patch with hunks starting past address 0xFFFFFF cannot be written")]
-    #[diagnostic(code(ips::too_long))]
-    TooLong,
     #[error(transparent)]
     #[diagnostic(code(ips::io))]
     Io(#[from] io::Error),
@@ -447,13 +377,6 @@ mod test {
         assert!(vec.has_hunk_starting_at(50));
         assert!(!vec.has_hunk_starting_at(62));
         assert!(!vec.has_hunk_starting_at(0));
-
-        assert!(vec.has_hunk_starting_after(15, 6));
-        assert!(vec.has_hunk_starting_after(49, 6));
-        assert!(vec.has_hunk_starting_after(59, 6));
-        assert!(!vec.has_hunk_starting_after(60, 6));
-        assert!(!vec.has_hunk_starting_after(62, 6));
-        assert!(!vec.has_hunk_starting_after(70, 6));
     }
 
     fn generate_patch_vec(patches: &[(u32, &[u8])]) -> PatchVec {
@@ -518,29 +441,29 @@ mod test {
             let mut result = vec![];
             generate_ips(&generate_patch_vec(patches), &mut result).unwrap();
 
-            assert_eq!(&result[..5], b"PATCH");
-            assert_eq!(&result[result.len() - 3..], b"EOF");
+            assert_eq!(&result[..5], b"IPS32");
+            assert_eq!(&result[result.len() - 4..], b"EEOF");
             result.drain(..5);
-            result.drain(result.len() - 3..);
+            result.drain(result.len() - 4..);
             result
         }
 
         assert_eq!(
             generate(&[(50, &[10, 20, 30])]),
-            &[0, 0, 50, 0, 3, 10, 20, 30],
+            &[0, 0, 0, 50, 0, 3, 10, 20, 30],
         );
         assert_eq!(
             generate(&[(50, &[30, 30, 30])]),
-            &[0, 0, 50, 0, 3, 30, 30, 30],
+            &[0, 0, 0, 50, 0, 3, 30, 30, 30],
         );
 
         assert_eq!(
             generate(&[(50, &[10, 20, 30, 40, 50, 60])]),
-            &[0, 0, 50, 0, 6, 10, 20, 30, 40, 50, 60],
+            &[0, 0, 0, 50, 0, 6, 10, 20, 30, 40, 50, 60],
         );
         assert_eq!(
             generate(&[(50, &[30, 30, 30, 30, 30, 30])]),
-            &[0, 0, 50, 0, 0, 0, 6, 30],
+            &[0, 0, 0, 50, 0, 0, 0, 6, 30],
         );
 
         assert_eq!(
@@ -549,12 +472,12 @@ mod test {
                 &[10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]
             )]),
             &[
-                0, 0, 50, 0, 15, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+                0, 0, 0, 50, 0, 15, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
             ],
         );
         assert_eq!(
             generate(&[(50, &[10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10])]),
-            &[0, 0, 50, 0, 0, 0, 11, 10],
+            &[0, 0, 0, 50, 0, 0, 0, 11, 10],
         );
         #[rustfmt::skip]
         assert_eq!(
@@ -563,8 +486,8 @@ mod test {
                 &[10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 10, 21, 22, 23, 24]
             )]),
             &[
-                0, 0, 50, 0, 0, 0, 11, 10,
-                0, 0, 61, 0, 4, 21, 22, 23, 24,
+                0, 0, 0, 50, 0, 0, 0, 11, 10,
+                0, 0, 0, 61, 0, 4, 21, 22, 23, 24,
             ],
         );
         #[rustfmt::skip]
@@ -577,8 +500,8 @@ mod test {
                 ]
             )]),
             &[
-                0, 0, 50, 0, 0, 0, 11, 10,
-                0, 0, 61, 0, 0, 0, 11, 20,
+                0, 0, 0, 50, 0, 0, 0, 11, 10,
+                0, 0, 0, 61, 0, 0, 0, 11, 20,
             ],
         );
         #[rustfmt::skip]
@@ -591,9 +514,9 @@ mod test {
                 ]
             )]),
             &[
-                0, 0, 50, 0, 0, 0, 11, 10,
-                0, 0, 61, 0, 7, 12, 13, 14, 15, 16, 17, 18,
-                0, 0, 68, 0, 0, 0, 11, 20,
+                0, 0, 0, 50, 0, 0, 0, 11, 10,
+                0, 0, 0, 61, 0, 7, 12, 13, 14, 15, 16, 17, 18,
+                0, 0, 0, 68, 0, 0, 0, 11, 20,
             ],
         );
 
@@ -602,69 +525,36 @@ mod test {
             generate(&[(
                 50,
                 &[
-                    10, 11, 12, 13, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 80, 81, 82,
-                    83
+                    10, 11, 12, 13, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50, 50,
+                    80, 81, 82, 83,
                 ]
             )]),
             &[
-                0, 0, 50, 0, 4, 10, 11, 12, 13,
-                0, 0, 54, 0, 0, 0, 13, 50,
-                0, 0, 67, 0, 4, 80, 81, 82, 83,
+                0, 0, 0, 50, 0, 4, 10, 11, 12, 13,
+                0, 0, 0, 54, 0, 0, 0, 16, 50,
+                0, 0, 0, 70, 0, 4, 80, 81, 82, 83,
             ],
         );
 
-        assert_eq!(generate(&[(0x454F44, b"hello")]), b"EOD\0\x05hello");
-        // This offset is because 0x444F46 + 0xFFFF ends right before 0x454F46
+        assert_eq!(generate(&[(0x45454F44, b"hello")]), b"EEOD\0\x05hello");
+        // This offset is because 0x45444F46 + 0xFFFF ends right before 0x45454F46
         #[rustfmt::skip]
         assert_eq!(
-            generate(&[(0x444F47, &[18; 0x10010])]),
+            generate(&[(0x45444F47, &[18; 0x10010])]),
             &[
-                0x44, 0x4F, 0x47, 0, 0, 0xFF, 0xFE, 18,
-                0x45, 0x4F, 0x45, 0, 0, 0x00, 0x12, 18,
+                0x45, 0x44, 0x4F, 0x47, 0, 0, 0xFF, 0xFE, 18,
+                0x45, 0x45, 0x4F, 0x45, 0, 0, 0x00, 0x12, 18,
             ],
         );
         #[rustfmt::skip]
         assert_eq!(
-            generate(&[(0x444F47, &[18; 0x20010])]),
+            generate(&[(0x45444F47, &[18; 0x20010])]),
             &[
-                0x44, 0x4F, 0x47, 0, 0, 0xFF, 0xFE, 18,
-                0x45, 0x4F, 0x45, 0, 0, 0xFF, 0xFF, 18,
-                0x46, 0x4F, 0x44, 0, 1, 18,
-                0x46, 0x4F, 0x45, 0, 0, 0x00, 0x12, 18,
+                0x45, 0x44, 0x4F, 0x47, 0, 0, 0xFF, 0xFE, 18,
+                0x45, 0x45, 0x4F, 0x45, 0, 0, 0xFF, 0xFF, 18,
+                0x45, 0x46, 0x4F, 0x44, 0, 1, 18,
+                0x45, 0x46, 0x4F, 0x45, 0, 0, 0x00, 0x12, 18,
             ],
-        );
-
-        assert_eq!(
-            generate(&[(0xFFFFFB, &[10, 20, 30, 40, 50])]),
-            &[0xFF, 0xFF, 0xFB, 0, 5, 10, 20, 30, 40, 50],
-        );
-        #[rustfmt::skip]
-        assert_eq!(
-            generate(&[(0xFFFFFC, &[10, 20, 30, 40, 50])]),
-            &[
-                0xFF, 0xFF, 0xFC, 0, 3, 10, 20, 30,
-                0xFF, 0xFF, 0xFF, 0, 2, 40, 50,
-            ],
-        );
-        #[rustfmt::skip]
-        assert_eq!(
-            generate(&[(0xFFFFFD, &[10, 20, 30, 40, 50])]),
-            &[
-                0xFF, 0xFF, 0xFD, 0, 2, 10, 20,
-                0xFF, 0xFF, 0xFF, 0, 3, 30, 40, 50,
-            ],
-        );
-        #[rustfmt::skip]
-        assert_eq!(
-            generate(&[(0xFFFFFE, &[10, 20, 30, 40, 50])]),
-            &[
-                0xFF, 0xFF, 0xFE, 0, 1, 10,
-                0xFF, 0xFF, 0xFF, 0, 4, 20, 30, 40, 50,
-            ],
-        );
-        assert_eq!(
-            generate(&[(0xFFFFFF, &[10, 20, 30, 40, 50])]),
-            &[0xFF, 0xFF, 0xFF, 0, 5, 10, 20, 30, 40, 50],
         );
     }
 }
