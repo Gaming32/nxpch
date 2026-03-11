@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 mod macros;
 mod option;
+mod output;
 mod parse;
 mod preprocessor;
 mod utils;

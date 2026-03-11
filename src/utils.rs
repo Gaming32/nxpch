@@ -1,4 +1,5 @@
 use miette::SourceOffset;
+use std::fmt::Debug;
 
 pub fn json5_error_to_offset(
     error: &json5::Error,
@@ -24,4 +25,13 @@ pub fn json5_error_to_offset(
             _ => base_offset,
         },
     }
+}
+
+pub fn all_but_last_assert<I>(mut iter: I, last_should_be: I::Item) -> I
+where
+    I: DoubleEndedIterator,
+    I::Item: PartialEq + Debug,
+{
+    assert_eq!(iter.next_back(), Some(last_should_be));
+    iter
 }
