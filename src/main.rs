@@ -1,6 +1,6 @@
 use crate::output::{generate_ips, generate_pchtxt};
 use crate::parse::PreParsedCode;
-use crate::pchtxt::pchtxt_to_patches;
+use crate::pchtxt::{pchtxt_to_nxpch, pchtxt_to_patches};
 use clap::{Parser, Subcommand};
 use clap_stdin::{FileOrStdin, FileOrStdout};
 use miette::{Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity};
@@ -29,9 +29,23 @@ enum Commands {
         /// The mod source code
         source: FileOrStdin,
     },
+    /// Convert a file from another format to nxpch
+    #[clap(subcommand)]
+    Import(ImportCommands),
     /// Commands related to working directly with pchtxt files
     #[clap(subcommand)]
     Pchtxt(PchtxtCommands),
+}
+
+#[derive(Subcommand)]
+enum ImportCommands {
+    /// Compile pchtxt to nxpch
+    Pchtxt {
+        /// The source pchtxt file
+        source: FileOrStdin,
+        /// The output nxpch file
+        output: FileOrStdout,
+    },
 }
 
 #[derive(Subcommand)]
@@ -61,6 +75,15 @@ fn main() -> miette::Result<()> {
                 (parsed.statements, parsed.diagnostics)
             })?;
             println!("{:#?}", pre_parsed_statements);
+        }
+        Commands::Import(ImportCommands::Pchtxt { source, output }) => {
+            let (_, _, nxpch) = parse_source_code(source, pchtxt_to_nxpch)?;
+            let (out_filename, mut output) = open_file_or_stdout(output)?;
+            output
+                .write_all(nxpch.as_bytes())
+                .into_diagnostic()
+                .with_context(|| format!("File {out_filename}"))?;
+            eprintln!("Finished importing into {out_filename}");
         }
         Commands::Pchtxt(PchtxtCommands::Compile { source, output }) => {
             let (_, _, (patch, _)) = parse_source_code(source, pchtxt_to_patches)?;

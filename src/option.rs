@@ -137,7 +137,7 @@ pub struct TargetBuildMatrixEntry {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PointerOffsetOption(u32);
+pub struct PointerOffsetOption(i32);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserSettingsOption(Vec<UserSetting>);
