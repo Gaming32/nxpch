@@ -1,120 +1,215 @@
 use crate::output::PatchVec;
 use miette::Diagnostic;
+use std::iter::Enumerate;
 use std::num::ParseIntError;
+use std::str::Lines;
 use subslice_offset::SubsliceOffset;
 use thiserror::Error;
 
 pub fn pchtxt_to_patches(pchtxt: &str) -> ((PatchVec, u128), Vec<PchtxtDianostic>) {
     let mut vec = PatchVec::new();
     let mut diags = vec![];
-    let mut enabled = false;
     let mut offset_shift = 0;
     let mut last_comment = "";
     let mut build_id = None;
-    for line in pchtxt.lines() {
-        if line.len() < 2 {
-            continue;
+    for line in PchtxtParseIter::new(pchtxt) {
+        if let Some(diag) = line.diag {
+            diags.push(diag);
         }
-        let line_start = pchtxt.subslice_offset(line).unwrap();
-        if build_id.is_none()
+        match line.data {
+            PchtxtLineData::Ignored => {}
+            PchtxtLineData::BuildId(bid) => build_id = Some(bid),
+            PchtxtLineData::Information => diags.push(PchtxtDianostic::Information {
+                message: line.line.to_string(),
+                at: (line.line_start, line.line.len()),
+            }),
+            PchtxtLineData::Comment => last_comment = line.line,
+            PchtxtLineData::BigEndian => {}
+            PchtxtLineData::LittleEndian => {}
+            PchtxtLineData::Enable => diags.push(PchtxtDianostic::PatchEnabled {
+                message: last_comment.to_string(),
+                at: (line.line_start, line.line.len()),
+            }),
+            PchtxtLineData::Flag(PchtxtFlag::PrintValues) => {}
+            PchtxtLineData::Flag(PchtxtFlag::OffsetShift(shift)) => offset_shift = shift,
+            PchtxtLineData::Stop => break,
+            PchtxtLineData::Disable => {}
+            PchtxtLineData::Patch(offset, patch) => {
+                let offset = offset.checked_add_signed(offset_shift).unwrap_or_else(|| {
+                    diags.push(PchtxtDianostic::OverUnderFlow {
+                        offset_shift,
+                        at: (line.line_start, 8),
+                    });
+                    offset.wrapping_add_signed(offset_shift)
+                });
+                vec.put(offset, patch);
+            }
+        }
+    }
+    if build_id.is_none() {
+        diags.insert(0, PchtxtDianostic::MissingBuildId);
+    }
+    ((vec, build_id.unwrap_or_default()), diags)
+}
+
+struct PchtxtParseIter<'a> {
+    pchtxt: &'a str,
+    lines: Enumerate<Lines<'a>>,
+    state: PchtxtParseState,
+}
+
+impl<'a> PchtxtParseIter<'a> {
+    fn new(pchtxt: &'a str) -> Self {
+        Self {
+            pchtxt,
+            lines: pchtxt.lines().enumerate(),
+            state: PchtxtParseState::Disabled,
+        }
+    }
+}
+
+impl<'a> Iterator for PchtxtParseIter<'a> {
+    type Item = PchtxtLine<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (line_num, line) = self.lines.next()?;
+        let mut diag = None;
+        let line_start = self.pchtxt.subslice_offset(line).unwrap();
+        if line.len() < 2 || self.state == PchtxtParseState::Stopped {
+            return Some(PchtxtLine {
+                line,
+                line_start,
+                data: PchtxtLineData::Ignored,
+                remainder: line,
+                diag,
+            });
+        }
+        if line_num == 0
             && let Some(build_id_text) = line.strip_prefix("@nsobid-")
         {
             let hex_len = build_id_text
                 .bytes()
                 .position(|x| !x.is_ascii_hexdigit())
                 .unwrap_or(build_id_text.len());
-            match u128::from_str_radix(&build_id_text[..hex_len], 16) {
-                Ok(bid) => build_id = Some(bid),
+            let bid = match u128::from_str_radix(&build_id_text[..hex_len], 16) {
+                Ok(bid) => bid,
                 Err(err) => {
-                    diags.push(PchtxtDianostic::InvalidBuildId {
+                    diag = Some(PchtxtDianostic::InvalidBuildId {
                         cause: err,
                         at: (line_start + 8, hex_len),
                     });
-                    build_id = Some(0); // Suppress "Missing @nsobid" error
+                    0
                 }
-            }
-            continue;
+            };
+            return Some(PchtxtLine {
+                line,
+                line_start,
+                data: PchtxtLineData::BuildId(bid),
+                remainder: &build_id_text[hex_len..],
+                diag,
+            });
         }
-        match line.as_bytes()[0] {
-            b'#' => diags.push(PchtxtDianostic::Information {
-                message: line.to_string(),
-                at: (line_start, line.len()),
-            }),
-            b'/' => last_comment = line,
+        let (data, remainder) = match line.as_bytes()[0] {
+            b'#' => (PchtxtLineData::Information, line),
+            b'/' => (PchtxtLineData::Comment, line),
             b'@' => match line.as_bytes()[1] {
-                b'b' | b'B' => diags.push(PchtxtDianostic::BigEndian {
-                    at: (line_start, line.len()),
-                }),
-                b'l' | b'L' => {}
-                b'e' | b'E' => {
-                    enabled = true;
-                    diags.push(PchtxtDianostic::PatchEnabled {
-                        message: last_comment.to_string(),
+                b'b' | b'B' => {
+                    diag = Some(PchtxtDianostic::BigEndian {
                         at: (line_start, line.len()),
                     });
+                    (
+                        PchtxtLineData::BigEndian,
+                        strip_prefix_case_insensitive(&line[2..], "ig-endian"),
+                    )
                 }
-                b'f' | b'F' => {
+                b'l' | b'L' => (
+                    PchtxtLineData::LittleEndian,
+                    strip_prefix_case_insensitive(&line[2..], "ittle-endian"),
+                ),
+                b'e' | b'E' => {
+                    self.state = PchtxtParseState::Enabled;
+                    (
+                        PchtxtLineData::Enable,
+                        strip_prefix_case_insensitive(&line[2..], "nabled"),
+                    )
+                }
+                b'f' | b'F' => 'parse_flag: {
                     if line.len() < 7 {
-                        continue;
+                        break 'parse_flag (PchtxtLineData::Ignored, line);
                     }
-                    let Some(flag_name) = cut_out_value(pchtxt, line, 6, &mut diags) else {
-                        continue;
+                    let Some(flag_name) = cut_out_value(self.pchtxt, line, 6, &mut diag) else {
+                        break 'parse_flag (PchtxtLineData::Ignored, line);
                     };
 
                     if flag_name.eq_ignore_ascii_case("print_values") {
-                        // Do nothing
+                        (
+                            PchtxtLineData::Flag(PchtxtFlag::PrintValues),
+                            &line[6 + flag_name.len()..],
+                        )
                     } else {
                         if line.len() < flag_name.len() + 8 {
-                            diags.push(PchtxtDianostic::UnknownFlag {
-                                at: (pchtxt.subslice_offset(flag_name).unwrap(), flag_name.len()),
+                            diag = Some(PchtxtDianostic::UnknownFlag {
+                                at: (line_start + 6, flag_name.len()),
                             });
-                            continue;
+                            break 'parse_flag (PchtxtLineData::Ignored, line);
                         }
                         let Some(flag_value) =
-                            cut_out_value(pchtxt, line, 6 + flag_name.len() + 1, &mut diags)
+                            cut_out_value(self.pchtxt, line, 6 + flag_name.len() + 1, &mut diag)
                         else {
-                            continue;
+                            break 'parse_flag (PchtxtLineData::Ignored, line);
                         };
+                        let remainder = &line[6 + flag_name.len() + 1 + flag_value.len()..];
                         if flag_name.eq_ignore_ascii_case("offset_shift") {
-                            offset_shift =
-                                parse_int::parse::<i32>(flag_value).ok().unwrap_or_default();
+                            (
+                                PchtxtLineData::Flag(PchtxtFlag::OffsetShift(
+                                    parse_int::parse::<i32>(flag_value).ok().unwrap_or_default(),
+                                )),
+                                remainder,
+                            )
                         } else {
-                            diags.push(PchtxtDianostic::UnknownFlag {
-                                at: (pchtxt.subslice_offset(flag_name).unwrap(), flag_name.len()),
+                            diag = Some(PchtxtDianostic::UnknownFlag {
+                                at: (line_start + 6, flag_name.len()),
                             });
+                            (PchtxtLineData::Ignored, line)
                         }
                     }
                 }
-                b's' | b'S' => break,
-                _ => enabled = false,
-            },
-            _ => {
-                if !enabled || line.len() < 11 {
-                    continue;
+                b's' | b'S' => {
+                    self.state = PchtxtParseState::Stopped;
+                    (
+                        PchtxtLineData::Stop,
+                        strip_prefix_case_insensitive(&line[2..], "top"),
+                    )
                 }
-                let mut offset = match u32::from_str_radix(&line[..8], 16) {
-                    Ok(off) => off.checked_add_signed(offset_shift).unwrap_or_else(|| {
-                        diags.push(PchtxtDianostic::OverUnderFlow {
-                            offset_shift,
-                            at: (line_start, 8),
-                        });
-                        off.wrapping_add_signed(offset_shift)
-                    }),
+                _ => {
+                    self.state = PchtxtParseState::Disabled;
+                    (
+                        PchtxtLineData::Disable,
+                        strip_prefix_case_insensitive(&line[1..], "disable"),
+                    )
+                }
+            },
+            _ => 'parse_patch: {
+                if self.state != PchtxtParseState::Enabled || line.len() < 11 {
+                    break 'parse_patch (PchtxtLineData::Ignored, line);
+                }
+                let offset = match u32::from_str_radix(&line[..8], 16) {
+                    Ok(off) => off,
                     Err(err) => {
-                        diags.push(PchtxtDianostic::InvalidOffset {
+                        diag = Some(PchtxtDianostic::InvalidOffset {
                             cause: err,
                             at: (line_start, 8),
                         });
-                        continue;
+                        break 'parse_patch (PchtxtLineData::Ignored, line);
                     }
                 };
 
                 if !line.is_char_boundary(9) {
                     let offset = line.floor_char_boundary(9);
-                    diags.push(PchtxtDianostic::UnexpectedUnicode {
+                    diag = Some(PchtxtDianostic::UnexpectedUnicode {
                         at: (line_start + offset, line.ceil_char_boundary(9) - offset),
                     });
-                    continue;
+                    break 'parse_patch (PchtxtLineData::Ignored, line);
                 }
 
                 let value_str = &line[9..];
@@ -126,11 +221,12 @@ pub fn pchtxt_to_patches(pchtxt: &str) -> ((PatchVec, u128), Vec<PchtxtDianostic
                         .position(|&[a, b]| b == b'"' && a != b'\\')
                         .map(|x| &value_str.as_bytes()[1..x + 2]);
                     let Some(value) = value else {
-                        diags.push(PchtxtDianostic::UnterminatedStringLiteral {
+                        diag = Some(PchtxtDianostic::UnterminatedStringLiteral {
                             at: line_start + line.len(),
                         });
-                        continue;
+                        break 'parse_patch (PchtxtLineData::Ignored, line);
                     };
+                    let mut patch = Vec::with_capacity(value.len() + 1);
                     let mut value_index = 0;
                     while value_index < value.len() {
                         let byte = if value[value_index] == b'\\' {
@@ -147,55 +243,70 @@ pub fn pchtxt_to_patches(pchtxt: &str) -> ((PatchVec, u128), Vec<PchtxtDianostic
                         } else {
                             value[value_index]
                         };
-                        vec.put_byte(offset, byte);
-                        offset += 1;
+                        patch.push(byte);
                         value_index += 1;
                     }
-                    vec.put_byte(offset, 0);
+                    patch.push(0);
+                    (
+                        PchtxtLineData::Patch(offset, patch),
+                        &value_str[1 + value.len() + 1..],
+                    )
                 } else {
-                    let Some(value) = cut_out_value(pchtxt, value_str, 0, &mut diags) else {
-                        continue;
+                    let Some(value) = cut_out_value(self.pchtxt, value_str, 0, &mut diag) else {
+                        break 'parse_patch (PchtxtLineData::Ignored, line);
                     };
                     if value.len() % 2 != 0 {
-                        diags.push(PchtxtDianostic::OddHexValueLength {
+                        diag = Some(PchtxtDianostic::OddHexValueLength {
                             at: (line_start + 9, value.len()),
                         });
-                        continue;
+                        break 'parse_patch (PchtxtLineData::Ignored, line);
                     }
                     if let Some(non_hex) = value
                         .as_bytes()
                         .iter()
                         .position(|&x| !x.is_ascii_hexdigit())
                     {
-                        diags.push(PchtxtDianostic::InvalidHexValue {
+                        diag = Some(PchtxtDianostic::InvalidHexValue {
                             at: (line_start + 9 + non_hex, 1),
                         });
-                        continue;
+                        break 'parse_patch (PchtxtLineData::Ignored, line);
                     }
+                    let mut patch = Vec::with_capacity(value.len() / 2);
                     let mut index = 0;
                     while index < value.len() {
-                        vec.put_byte(
-                            offset,
-                            u8::from_str_radix(&value[index..index + 2], 16).unwrap(),
-                        );
-                        offset += 1;
+                        patch.push(u8::from_str_radix(&value[index..index + 2], 16).unwrap());
                         index += 2;
                     }
+                    (
+                        PchtxtLineData::Patch(offset, patch),
+                        &value_str[value.len()..],
+                    )
                 }
             }
-        }
+        };
+        Some(PchtxtLine {
+            line,
+            line_start,
+            data,
+            remainder,
+            diag,
+        })
     }
-    if build_id.is_none() {
-        diags.insert(0, PchtxtDianostic::MissingBuildId);
+}
+
+fn strip_prefix_case_insensitive<'a>(text: &'a str, prefix: &str) -> &'a str {
+    if prefix.len() <= text.len() && text[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        &text[prefix.len()..]
+    } else {
+        text
     }
-    ((vec, build_id.unwrap_or_default()), diags)
 }
 
 fn cut_out_value<'a>(
     base: &str,
     s: &'a str,
     start: usize,
-    diags: &mut Vec<PchtxtDianostic>,
+    diag: &mut Option<PchtxtDianostic>,
 ) -> Option<&'a str> {
     let len = s.as_bytes()[start..]
         .iter()
@@ -205,7 +316,7 @@ fn cut_out_value<'a>(
     if result.is_none() {
         let offset = base.subslice_offset(s).unwrap();
         let char_floor = s.floor_char_boundary(start);
-        diags.push(PchtxtDianostic::UnexpectedUnicode {
+        *diag = Some(PchtxtDianostic::UnexpectedUnicode {
             at: (
                 offset + char_floor,
                 s.ceil_char_boundary(start + len) - char_floor,
@@ -215,7 +326,45 @@ fn cut_out_value<'a>(
     result
 }
 
-#[derive(Debug, Diagnostic, Error)]
+#[derive(Clone, Debug)]
+struct PchtxtLine<'a> {
+    line: &'a str,
+    line_start: usize,
+    data: PchtxtLineData,
+    remainder: &'a str,
+    /// Only Some for parse errors. Other lines can be generated later.
+    diag: Option<PchtxtDianostic>,
+}
+
+#[derive(Clone, Debug)]
+enum PchtxtLineData {
+    Ignored,
+    BuildId(u128),
+    Information,
+    Comment,
+    BigEndian,
+    LittleEndian,
+    Enable,
+    Flag(PchtxtFlag),
+    Stop,
+    Disable,
+    Patch(u32, Vec<u8>),
+}
+
+#[derive(Copy, Clone, Debug)]
+enum PchtxtFlag {
+    PrintValues,
+    OffsetShift(i32),
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+enum PchtxtParseState {
+    Enabled,
+    Disabled,
+    Stopped,
+}
+
+#[derive(Clone, Debug, Diagnostic, Error)]
 pub enum PchtxtDianostic {
     #[error("{message}")]
     #[diagnostic(code(pchtxt::info), severity(advice))]
