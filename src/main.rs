@@ -3,12 +3,12 @@ use crate::parse::PreParsedCode;
 use crate::pchtxt::{pchtxt_to_nxpch, pchtxt_to_patches};
 use clap::{Parser, Subcommand};
 use clap_stdin::{FileOrStdin, FileOrStdout};
+use keystone::{Arch, Keystone, Mode};
 use miette::{Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity};
 use std::io::{BufWriter, Write};
 use std::process;
 use std::sync::Arc;
 
-mod macros;
 mod option;
 mod output;
 mod parse;
@@ -167,4 +167,22 @@ fn print_diags(
         message.clear();
     }
     error_count
+}
+
+fn fiddle() {
+    let key = Keystone::new(Arch::ARM64, Mode::empty()).unwrap();
+    let result = key
+        .asm(
+            r"
+    informDamageFull_Sender = 9889896
+    ldr x0, [x1, #0xdb0]
+    b informDamageFull_Sender
+    "
+            .to_string(),
+            0x0064E638,
+        )
+        .unwrap();
+    for chunk in result.bytes.as_chunks::<4>().0 {
+        println!("{:08X}", u32::from_be_bytes(*chunk));
+    }
 }

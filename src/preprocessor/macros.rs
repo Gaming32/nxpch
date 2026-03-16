@@ -68,6 +68,7 @@ impl MacroDefine {
         &self,
         arg_values: Option<&[(&str, usize)]>,
     ) -> Option<(Cow<'_, str>, Vec<usize>)> {
+        // TODO: Implement # and ##
         if arg_values.map(<[_]>::len) != self.args.as_ref().map(Vec::len) {
             return None;
         }
@@ -105,16 +106,16 @@ impl MacroDefine {
     }
 
     pub fn expand_all_in<'a>(
-        s: &str,
+        s: Cow<str>,
         offset: usize,
         get_macro: impl Fn(&str) -> Option<&'a MacroDefine>,
         mut record_diagnostic: impl FnMut(MacroDiagnostic),
-    ) -> Cow<'_, str> {
-        let mut result = Cow::Borrowed(s);
+    ) -> (Cow<str>, Vec<usize>) {
         let mut offsets = Self::len_vec(offset, s.len());
+        let mut result = s;
         let mut skip_index = 0;
         while let Some((used_macro, call_range, args)) =
-            Self::find_first_macro_use(&result, skip_index, offset, &get_macro)
+            Self::find_first_macro_use(&result, skip_index, &offsets, &get_macro)
         {
             if let Some((new_value, new_value_range)) = used_macro.expand_parsed(args.as_deref()) {
                 result
@@ -133,15 +134,15 @@ impl MacroDefine {
                 skip_index = call_range.end;
             }
         }
-        result
+        (result, offsets)
     }
 
-    fn find_first_macro_use<'a>(
-        s: &str,
+    fn find_first_macro_use<'a, 'b>(
+        s: &'b str,
         skip_index: usize,
-        base_offset: usize,
+        base_offsets: &[usize],
         get_macro: impl Fn(&str) -> Option<&'a MacroDefine>,
-    ) -> Option<(&'a MacroDefine, Range<usize>, Option<Vec<(&str, usize)>>)> {
+    ) -> Option<(&'a MacroDefine, Range<usize>, Option<Vec<(&'b str, usize)>>)> {
         let mut current = &s[skip_index..];
         loop {
             let Some([Some(found)]) = Self::NAME_REGEX.exec(current) else {
@@ -187,7 +188,7 @@ impl MacroDefine {
                         .split(',')
                         .map(|arg| {
                             let arg = arg.trim();
-                            (arg, s.subslice_offset(arg).unwrap() + base_offset)
+                            (arg, base_offsets[s.subslice_offset(arg).unwrap()])
                         })
                         .collect()
                 }),
@@ -195,7 +196,8 @@ impl MacroDefine {
         }
     }
 
-    fn len_vec(start: usize, len: usize) -> Vec<usize> {
+    // pub(super) for testing
+    pub(super) fn len_vec(start: usize, len: usize) -> Vec<usize> {
         Self::len_range(start, len).collect()
     }
 
@@ -244,21 +246,21 @@ impl FromStr for MacroDefine {
 #[derive(Debug, Clone, PartialEq, Eq, Diagnostic, Error)]
 pub enum MacroDiagnostic {
     #[error("Invalid macro syntax")]
-    #[diagnostic(code(macros::invalid))]
+    #[diagnostic(code(preprocessor::macros::invalid))]
     InvalidMacro {
         #[label(r#"Macros should follow the format "MACRO_NAME", "MACRO_NAME expansion", or "MACRO_NAME(arg1, arg2) expansion""#)]
         at: (usize, usize),
     },
 
     #[error("Invalid macro argument")]
-    #[diagnostic(code(macros::invalid_arg))]
+    #[diagnostic(code(preprocessor::macros::invalid_arg))]
     InvalidArg {
         #[label(r#"Should only contain ASCII letters, numbers, and _"#)]
         at: (usize, usize),
     },
 
     #[error("Wrong number of macro arguments. Expected {expected}, but received {found}.")]
-    #[diagnostic(code(macros::invalid_arg))]
+    #[diagnostic(code(preprocessor::macros::invalid_arg))]
     WrongNumberOfMacroArgs {
         expected: usize,
         found: usize,
@@ -272,8 +274,9 @@ pub enum MacroDiagnostic {
 
 #[cfg(test)]
 mod test {
-    use crate::macros::{MacroDefine, MacroDiagnostic};
+    use super::{MacroDefine, MacroDiagnostic};
     use pretty_assertions::assert_eq;
+    use std::borrow::Cow;
     use std::collections::HashMap;
 
     fn parse_in_place(s: &str) -> Result<MacroDefine, Vec<MacroDiagnostic>> {
@@ -445,43 +448,98 @@ mod test {
         let test_expand = move |code| {
             let mut diags = vec![];
             let result = MacroDefine::expand_all_in(
-                code,
+                Cow::Borrowed(code),
                 100,
                 |name| macros.get(name),
                 |diag| diags.push(diag),
             );
-            (result, diags)
+            (result.0, diags, result.1)
         };
 
-        assert_eq!(test_expand("a + b"), ("a + b".into(), vec![]));
-        assert_eq!(test_expand("a + BLANK_MACRO"), ("a + ".into(), vec![]));
+        assert_eq!(
+            test_expand("a + b"),
+            ("a + b".into(), vec![], MacroDefine::len_vec(100, 5)),
+        );
+        assert_eq!(
+            test_expand("a + BLANK_MACRO"),
+            ("a + ".into(), vec![], MacroDefine::len_vec(100, 4)),
+        );
         assert_eq!(
             test_expand("a + SIMPLE_MACRO"),
-            ("a + something".into(), vec![]),
+            (
+                "a + something".into(),
+                vec![],
+                [
+                    MacroDefine::len_vec(100, 4).as_slice(),
+                    MacroDefine::len_vec(13, 9).as_slice(),
+                ]
+                .concat(),
+            ),
         );
         assert_eq!(
             test_expand("a + SIMPLE_MACRO + BLANK_MACRO + c + SIMPLE_MACRO"),
-            ("a + something +  + c + something".into(), vec![]),
+            (
+                "a + something +  + c + something".into(),
+                vec![],
+                [
+                    MacroDefine::len_vec(100, 4).as_slice(),
+                    MacroDefine::len_vec(13, 9).as_slice(),
+                    MacroDefine::len_vec(116, 3).as_slice(),
+                    MacroDefine::len_vec(130, 7).as_slice(),
+                    MacroDefine::len_vec(13, 9).as_slice(),
+                ]
+                .concat(),
+            ),
         );
         assert_eq!(
             test_expand("SIMPLE_MACRO()"),
-            ("something()".into(), vec![]),
+            (
+                "something()".into(),
+                vec![],
+                [
+                    MacroDefine::len_vec(13, 9).as_slice(),
+                    MacroDefine::len_vec(112, 2).as_slice(),
+                ]
+                .concat(),
+            ),
         );
         assert_eq!(
             test_expand("SIMPLE_MACRO_REQUIRED_ARGS()"),
-            ("other".into(), vec![]),
+            ("other".into(), vec![], MacroDefine::len_vec(29, 5)),
         );
         assert_eq!(
             test_expand("SIMPLE_MACRO_REQUIRED_ARGS"),
-            ("SIMPLE_MACRO_REQUIRED_ARGS".into(), vec![]),
+            (
+                "SIMPLE_MACRO_REQUIRED_ARGS".into(),
+                vec![],
+                MacroDefine::len_vec(100, 26),
+            ),
         );
         assert_eq!(
             test_expand("ARG_MACRO(55)"),
-            ("hello & (55)".into(), vec![])
+            (
+                "hello & (55)".into(),
+                vec![],
+                [
+                    MacroDefine::len_vec(15, 9).as_slice(),
+                    MacroDefine::len_vec(110, 2).as_slice(),
+                    MacroDefine::len_vec(27, 1).as_slice(),
+                ]
+                .concat(),
+            ),
         );
         assert_eq!(
             test_expand("ARG_MACRO(with space)"),
-            ("hello & (with space)".into(), vec![]),
+            (
+                "hello & (with space)".into(),
+                vec![],
+                [
+                    MacroDefine::len_vec(15, 9).as_slice(),
+                    MacroDefine::len_vec(110, 10).as_slice(),
+                    MacroDefine::len_vec(27, 1).as_slice(),
+                ]
+                .concat(),
+            ),
         );
         assert_eq!(
             test_expand("1 + ARG_MACRO(55, too many) + 2"),
@@ -492,18 +550,33 @@ mod test {
                     found: 2,
                     call_site: (104, 23),
                     declaration_site: (0, 14),
-                }]
+                }],
+                MacroDefine::len_vec(100, 31),
             ),
         );
         assert_eq!(
             test_expand("SIMPLE_MACRO(no arg)"),
-            ("something(no arg)".into(), vec![]),
+            (
+                "something(no arg)".into(),
+                vec![],
+                [
+                    MacroDefine::len_vec(13, 9).as_slice(),
+                    MacroDefine::len_vec(112, 8).as_slice(),
+                ]
+                .concat(),
+            ),
         );
-        assert_eq!(test_expand("something()"), ("something()".into(), vec![]));
-        assert_eq!(test_expand("ARG_MACRO"), ("ARG_MACRO".into(), vec![]));
+        assert_eq!(
+            test_expand("something()"),
+            ("something()".into(), vec![], MacroDefine::len_vec(100, 11)),
+        );
+        assert_eq!(
+            test_expand("ARG_MACRO"),
+            ("ARG_MACRO".into(), vec![], MacroDefine::len_vec(100, 9)),
+        );
         assert_eq!(
             test_expand(
-                "SIMPLE_MACRO(^) * ARG_MACRO(55) + MULTI_ARG_MACRO(58, %) / MULTI_ARG_MACRO(%)"
+                "SIMPLE_MACRO(^) * ARG_MACRO(55) + MULTI_ARG_MACRO(58, %) / MULTI_ARG_MACRO(%)",
             ),
             (
                 "something(^) * hello & (55) + ((58) | (%)) / MULTI_ARG_MACRO(%)".into(),
@@ -512,20 +585,72 @@ mod test {
                     found: 1,
                     call_site: (159, 18),
                     declaration_site: (0, 27),
-                }]
+                }],
+                [
+                    MacroDefine::len_vec(13, 9).as_slice(),
+                    MacroDefine::len_vec(112, 6).as_slice(),
+                    MacroDefine::len_vec(15, 9).as_slice(),
+                    MacroDefine::len_vec(128, 2).as_slice(),
+                    MacroDefine::len_vec(27, 1).as_slice(),
+                    MacroDefine::len_vec(131, 3).as_slice(),
+                    MacroDefine::len_vec(28, 2).as_slice(),
+                    MacroDefine::len_vec(150, 2).as_slice(),
+                    MacroDefine::len_vec(34, 5).as_slice(),
+                    MacroDefine::len_vec(154, 1).as_slice(),
+                    MacroDefine::len_vec(43, 2).as_slice(),
+                    MacroDefine::len_vec(156, 21).as_slice(),
+                ]
+                .concat(),
             ),
         );
         assert_eq!(
             test_expand("RECURSIVE_MACRO(89, 90)"),
-            ("hello & (90) * 89 + 90 * hello & (89)".into(), vec![]),
+            (
+                "hello & (90) * 89 + 90 * hello & (89)".into(),
+                vec![],
+                [
+                    MacroDefine::len_vec(15, 9).as_slice(),
+                    MacroDefine::len_vec(120, 2).as_slice(),
+                    MacroDefine::len_vec(27, 1).as_slice(),
+                    MacroDefine::len_vec(43, 3).as_slice(),
+                    MacroDefine::len_vec(116, 2).as_slice(),
+                    MacroDefine::len_vec(50, 3).as_slice(),
+                    MacroDefine::len_vec(120, 2).as_slice(),
+                    MacroDefine::len_vec(57, 3).as_slice(),
+                    MacroDefine::len_vec(15, 9).as_slice(),
+                    MacroDefine::len_vec(116, 2).as_slice(),
+                    MacroDefine::len_vec(27, 1).as_slice(),
+                ]
+                .concat(),
+            ),
         );
         assert_eq!(
             test_expand("FANCY_RECURSIVE_MACRO(89, 90, MULTI_ARG_MACRO)"),
-            ("((89) | (90))".into(), vec![]),
+            (
+                "((89) | (90))".into(),
+                vec![],
+                [
+                    MacroDefine::len_vec(28, 2).as_slice(),
+                    MacroDefine::len_vec(122, 2).as_slice(),
+                    MacroDefine::len_vec(34, 5).as_slice(),
+                    MacroDefine::len_vec(126, 2).as_slice(),
+                    MacroDefine::len_vec(43, 2).as_slice(),
+                ]
+                .concat(),
+            ),
         );
         assert_eq!(
             test_expand("REFERENCE_MACRO(55)"),
-            ("hello & (55)".into(), vec![]),
+            (
+                "hello & (55)".into(),
+                vec![],
+                [
+                    MacroDefine::len_vec(15, 9).as_slice(),
+                    MacroDefine::len_vec(116, 2).as_slice(),
+                    MacroDefine::len_vec(27, 1).as_slice(),
+                ]
+                .concat(),
+            ),
         );
     }
 }

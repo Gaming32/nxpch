@@ -1,6 +1,7 @@
-use crate::macros::{MacroDefine, MacroDiagnostic};
+use crate::preprocessor::{MacroDefine, MacroDiagnostic};
 use crate::utils::json5_error_to_offset;
 use miette::Diagnostic;
+use std::collections::HashMap;
 use subslice_offset::SubsliceOffset;
 use thiserror::Error;
 
@@ -113,6 +114,51 @@ impl PreprocessorDirective {
     }
 }
 
+#[derive(Clone, Debug)]
+pub struct PreprocessorState {
+    defines: HashMap<String, MacroDefine>,
+    activity: Vec<bool>,
+}
+
+impl PreprocessorState {
+    pub fn new() -> Self {
+        Self {
+            defines: HashMap::new(),
+            activity: vec![true],
+        }
+    }
+
+    pub fn active(&self) -> bool {
+        *self.activity.last().unwrap()
+    }
+
+    // pub fn preprocess_line<'a>(
+    //     &self,
+    //     s: Cow<'a, str>,
+    //     offset: usize,
+    //     mut record_diagnostic: impl FnMut(PreprocessorDiagnostic),
+    // ) -> Cow<'a, str> {
+    //     MacroDefine::expand_all_in(
+    //         s,
+    //         offset,
+    //         |name| self.defines.get(name),
+    //         |diag| record_diagnostic(diag.into()),
+    //     )
+    // }
+
+    pub fn exec(
+        &mut self,
+        directive: PreprocessorDirective,
+        mut record_diagnostic: impl FnMut(PreprocessorDiagnostic),
+    ) {
+        // match directive {
+        //     PreprocessorDirective::If(action) => {
+        //         // let
+        //     }
+        // }
+    }
+}
+
 #[derive(Debug, Clone, Diagnostic, Error)]
 pub enum PreprocessorDiagnostic {
     #[error("#{keyword} missing argument")]
@@ -159,5 +205,5 @@ pub enum PreprocessorDiagnostic {
 
     #[error(transparent)]
     #[diagnostic(transparent)]
-    MacroDefine(#[from] MacroDiagnostic),
+    Macro(#[from] MacroDiagnostic),
 }

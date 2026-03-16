@@ -82,7 +82,7 @@ pub fn pchtxt_to_nxpch(pchtxt: &str) -> (String, Vec<PchtxtDianostic>) {
         }
     }
 
-    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    #[derive(Copy, Clone, Debug, PartialEq, Eq)]
     enum Status {
         PreEnabled,
         Enabled,
@@ -675,7 +675,7 @@ enum PchtxtFlag {
     OffsetShift(i32),
 }
 
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum PchtxtParseState {
     Enabled,
     Disabled,

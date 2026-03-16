@@ -1,4 +1,4 @@
-use crate::macros::MacroDefine;
+use crate::preprocessor::MacroDefine;
 use json5_nodes::JsonNode;
 use miette::SourceOffset;
 use serde::{Deserialize, Serialize};
