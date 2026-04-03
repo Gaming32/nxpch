@@ -743,6 +743,7 @@ dependencies = [
  "serde",
  "serde_with",
  "smallvec",
+ "str-block",
  "strsim",
  "strum",
  "subslice-offset",
@@ -851,6 +852,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8fd00f0bb2e90d81d1044c2b32617f68fcb9fa3bb7640c23e9c748e53fb30934"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "proclet"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "309f6258fa0d7b6a3fddb3a927af59a58f1970debaa9175ea09fa49a811b9dcd"
+dependencies = [
+ "proc-macro2",
 ]
 
 [[package]]
@@ -1050,6 +1060,15 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "str-block"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3bb3fc49213697b591fcd23e128104937a793cded7229926bbb879df8ccc4ca"
+dependencies = [
+ "proclet",
+]
 
 [[package]]
 name = "strsim"

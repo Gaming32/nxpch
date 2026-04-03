@@ -55,7 +55,7 @@ enum Token<'source> {
     LeftParenthesis,
     #[token(")")]
     RightParenthesis,
-    #[regex("0|[1-9][0-9]+", |lex| lex.slice().parse())]
+    #[regex("0|[1-9][0-9]*", |lex| lex.slice().parse())]
     #[regex("0[xX][0-9a-fA-F]+", |lex| ExprValue::from_str_radix(&lex.slice()[2..], 16))]
     #[regex("0[bB][01]+", |lex| ExprValue::from_str_radix(&lex.slice()[2..], 2))]
     #[regex("0[0-7]+", |lex| ExprValue::from_str_radix(&lex.slice()[1..], 8))]
@@ -401,6 +401,7 @@ pub enum ExprDiagnostic {
 mod test {
     use crate::preprocessor::MacroDefine;
     use crate::preprocessor::expr::{EvalResult, ExprDiagnostic, ExprValue, evaluate};
+    use pretty_assertions::assert_eq;
 
     fn eval(expr: &str) -> EvalResult {
         evaluate(expr, &MacroDefine::len_vec(0, expr.len()), |name| {
@@ -416,9 +417,16 @@ mod test {
         assert_eq!(eval("an_identifier"), Ok(0));
 
         assert_eq!(eval("0"), Ok(0));
+        assert_eq!(eval("5"), Ok(5));
         assert_eq!(eval("10"), Ok(10));
+        assert_eq!(eval("0x0"), Ok(0x0));
+        assert_eq!(eval("0xA"), Ok(0xA));
         assert_eq!(eval("0x10"), Ok(0x10));
+        assert_eq!(eval("0b0"), Ok(0b0));
+        assert_eq!(eval("0b1"), Ok(0b1));
         assert_eq!(eval("0b10"), Ok(0b10));
+        assert_eq!(eval("00"), Ok(0o0));
+        assert_eq!(eval("04"), Ok(0o4));
         assert_eq!(eval("010"), Ok(0o10));
         assert_eq!(eval("-0x8000000000000000"), Ok(-0x8000000000000000));
         assert_eq!(

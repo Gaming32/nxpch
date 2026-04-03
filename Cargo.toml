@@ -25,3 +25,4 @@ thiserror = "2.0.18"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
+str-block = "0.1.2"

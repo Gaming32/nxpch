@@ -1,5 +1,7 @@
-use miette::SourceOffset;
+use miette::{SourceOffset, SourceSpan};
+use std::cmp::max;
 use std::fmt::Debug;
+use std::mem;
 
 pub fn json5_error_to_offset(
     error: &json5::Error,
@@ -34,4 +36,51 @@ where
 {
     assert_eq!(iter.next_back(), Some(last_should_be));
     iter
+}
+
+#[inline]
+pub fn ensure_ordered<T: Ord>(a: &mut T, b: &mut T) {
+    if a > b {
+        mem::swap(a, b)
+    }
+}
+
+#[inline]
+pub fn order_tuple<T: Ord>((mut a, mut b): (T, T)) -> (T, T) {
+    ensure_ordered(&mut a, &mut b);
+    (a, b)
+}
+
+pub trait Combine<Rhs = Self> {
+    type Output;
+
+    fn combine(self, rhs: Rhs) -> Self::Output;
+}
+
+impl<Lhs, Rhs> Combine<Rhs> for Lhs
+where
+    Lhs: Into<SourceSpan>,
+    Rhs: Into<SourceSpan>,
+{
+    type Output = SourceSpan;
+
+    fn combine(self, rhs: Rhs) -> Self::Output {
+        let (a, b) = order_tuple((self.into(), rhs.into()));
+        (a.offset(), max(b.offset() - a.offset() + b.len(), a.len())).into()
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use crate::utils::Combine;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn test_combine() {
+        assert_eq!((0, 5).combine((10, 5)), (0, 15).into());
+        assert_eq!((20, 0).combine((0, 0)), (0, 20).into());
+        assert_eq!((5, 20).combine((10, 5)), (5, 20).into());
+        assert_eq!((10, 5).combine((5, 20)), (5, 20).into());
+        assert_eq!((10..20).combine(15..30), (10..30).into());
+    }
 }
