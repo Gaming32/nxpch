@@ -97,9 +97,10 @@ pub fn evaluate<M: Fn(&str) -> bool>(
             }
             Some((Ok(tok), span)) => Ok(Err(Some((tok, span)))),
             Some((Err(err), span)) => Err(match err {
-                TokenError::InvalidNumber(cause) => {
-                    ExprDiagnostic::InvalidNumber { cause, at: span }
-                }
+                TokenError::InvalidNumber(cause) => ExprDiagnostic::InvalidNumber {
+                    cause: cause.to_string(),
+                    at: span,
+                },
                 TokenError::Unknown => ExprDiagnostic::UnknownToken { at: span },
             }),
             None => Ok(Err(None)),
@@ -342,7 +343,7 @@ pub fn evaluate<M: Fn(&str) -> bool>(
     result
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Error, Diagnostic)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Error, Diagnostic)]
 pub enum ExprDiagnostic {
     #[error("Unknown token in #if expression")]
     #[diagnostic(code(preprocessor::expr::unknown_token))]
@@ -364,8 +365,7 @@ pub enum ExprDiagnostic {
     #[error("Invalid number in #if expression")]
     #[diagnostic(code(preprocessor::expr::invalid_number))]
     InvalidNumber {
-        #[source]
-        cause: ParseIntError,
+        cause: String,
 
         #[label("{cause}")]
         at: Range<usize>,
@@ -434,7 +434,8 @@ mod test {
             Err(ExprDiagnostic::InvalidNumber {
                 cause: ExprValue::from_str_radix("8000000000000000", 16)
                     .err()
-                    .unwrap(),
+                    .unwrap()
+                    .to_string(),
                 at: 0..18,
             })
         );

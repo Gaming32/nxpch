@@ -34,10 +34,6 @@ impl PatchVec {
         }
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.data.is_empty()
-    }
-
     pub fn has_edit_at(&self, address: u32) -> bool {
         self.data.contains_key(&address)
     }

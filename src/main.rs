@@ -1,14 +1,17 @@
 use crate::output::{generate_ips, generate_pchtxt};
-use crate::parse::parse_statements;
+use crate::parse::{BuildTarget, ForcedBuildOption, parse_statements};
 use crate::pchtxt::{pchtxt_to_nxpch, pchtxt_to_patches};
 use crate::pre_parse::PreParsedCode;
+use crate::preprocessor::MacroDefine;
 use clap::{Parser, Subcommand};
 use clap_stdin::{FileOrStdin, FileOrStdout};
+use hashlink::LinkedHashSet;
 use keystone::{Arch, Keystone, Mode};
 use miette::{Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity};
 use std::io::{BufWriter, Write};
-use std::process;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::{iter, process};
 
 mod option;
 mod output;
@@ -30,6 +33,18 @@ enum Commands {
     Build {
         /// The mod source code
         source: FileOrStdin,
+        /// Generates a single file instead of a zip file distribution. Will error if multiple
+        /// files would be generated. May be given a file path to output to.
+        #[clap(short('S'), long)]
+        single: Option<Option<PathBuf>>,
+        /// Single build target to build for. If not specified, will build for both targets.
+        #[clap(short, long)]
+        target: Option<BuildTarget>,
+        /// An additional predefined macro in the form of -DMACRO_NAME or -D"MACRO_NAME expansion".
+        /// Note that this differs from the gcc syntax of -DMACRO_NAME=expansion. This may be
+        /// specified multiple times.
+        #[clap(short('D'), long)]
+        define: Vec<MacroDefine>,
     },
     /// Convert a file from another format to nxpch
     #[clap(subcommand)]
@@ -71,19 +86,35 @@ enum PchtxtCommands {
 fn main() -> miette::Result<()> {
     let args = RootArgs::parse();
     match args.command {
-        Commands::Build { source } => {
+        Commands::Build {
+            source,
+            single: _,
+            target,
+            define,
+        } => {
             let (filename, source, pre_parsed_statements) = parse_source_code(source, |src| {
                 let parsed = PreParsedCode::parse(src);
                 (parsed.statements, parsed.diagnostics)
             })?;
-            let mut errors = 0;
+
+            let mut parse_diags = LinkedHashSet::new();
             let generated_results = parse_statements(
                 pre_parsed_statements.into_iter().map(|(_, s)| s),
-                [],
+                define,
+                target.map_or_else(
+                    || vec![BuildTarget::Emulator, BuildTarget::Hardware],
+                    |t| vec![t],
+                ),
+                ForcedBuildOption {
+                    build_id: None,
+                    options: vec![],
+                },
                 |diag| {
-                    errors += print_diags(vec![diag], &filename, &source);
+                    parse_diags.get_or_insert(diag);
                 },
             );
+            check_error_count(print_diags(parse_diags, &filename, &source));
+
             println!("{:#?}", generated_results);
         }
         Commands::Import(ImportCommands::Pchtxt { source, output }) => {
@@ -131,8 +162,7 @@ where
         .into_diagnostic()
         .with_context(|| format!("Reading file {filename}"))?;
     let (parsed, diags) = parser(&raw_source);
-    let error_count = print_diags(diags, &filename, &raw_source);
-    check_error_count(error_count);
+    check_error_count(print_diags(diags, &filename, &raw_source));
     Ok((filename, raw_source, parsed))
 }
 
@@ -153,18 +183,19 @@ fn open_file_or_stdout(output: FileOrStdout) -> miette::Result<(String, BufWrite
 }
 
 fn print_diags(
-    diags: Vec<impl Diagnostic + Send + Sync + 'static>,
+    diags: impl IntoIterator<Item = impl Diagnostic + Send + Sync + 'static>,
     filename: &str,
     source: &str,
 ) -> usize {
-    if diags.is_empty() {
+    let mut diags = diags.into_iter();
+    let Some(first) = diags.next() else {
         return 0;
-    }
+    };
     let source_code = Arc::new(NamedSource::new(filename, source.to_string()));
     let reporter = GraphicalReportHandler::new();
     let mut message = String::new();
     let mut error_count = 0;
-    for diag in diags {
+    for diag in iter::once(first).chain(diags) {
         if diag.severity().is_none_or(|x| x == Severity::Error) {
             error_count += 1;
         }

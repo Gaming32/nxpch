@@ -2,19 +2,22 @@ use crate::option::{BuildId, NxpchOption, OutputFormat};
 use crate::pre_parse::PreParsedStatement;
 use crate::preprocessor::{MacroDefine, PreprocessorDiagnostic, PreprocessorState};
 use crate::utils::{AsNum, closest_key};
+use clap::ValueEnum;
 use miette::{Diagnostic, SourceOffset, SourceSpan};
-use num_traits::{Num, PrimInt, Signed, Unsigned};
+use num_traits::{Num, Signed, Unsigned};
+use ordered_float::OrderedFloat;
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap};
 use std::num::{IntErrorKind, ParseIntError};
 use std::sync::Arc;
 use std::vec;
 use subslice_offset::SubsliceOffset;
 use thiserror::Error;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParsingResult {
+    pub build_target: BuildTarget,
     pub target_build: BuildId,
     pub forced_output_format: Option<OutputFormat>,
     pub user_settings: Vec<Arc<str>>,
@@ -22,53 +25,90 @@ pub struct ParsingResult {
     pub labels: Vec<(String, u32)>,
 }
 
-pub fn parse_statements<I>(
+#[derive(Clone, Debug, Default)]
+pub struct ForcedBuildOption {
+    pub build_id: Option<BuildId>,
+    pub options: Vec<String>,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+pub enum BuildTarget {
+    Emulator,
+    Hardware,
+}
+
+pub fn parse_statements<I, Defines, Targets>(
     statements: I,
-    pre_defines: impl IntoIterator<Item = MacroDefine>,
+    initial_defines: Defines,
+    build_targets: Targets,
+    forced: ForcedBuildOption,
     mut record_diagnostic: impl FnMut(ParseDiagnostic),
-) -> Vec<ParsingResult>
+) -> BTreeSet<ParsingResult>
 where
     I: IntoIterator<Item = PreParsedStatement>,
     I::IntoIter: Clone,
+    Defines: IntoIterator<Item = MacroDefine>,
+    Targets: IntoIterator<Item = BuildTarget>,
 {
-    let mut state = ParseState::new(statements.into_iter());
-    for define in pre_defines {
-        state.active_states[0]
-            .preprocessor
-            .define(define, diag(&mut record_diagnostic));
+    let mut state = ParseState::new(statements.into_iter(), &forced);
+
+    {
+        let start_state = &mut state.active_states[0];
+        for define in initial_defines {
+            start_state
+                .preprocessor
+                .define(define, diag(&mut record_diagnostic));
+        }
+
+        let mut new_start_states = vec![];
+        start_state.make_forks(&mut new_start_states, build_targets, |target, fork| {
+            fork.build_target = target;
+            fork.preprocessor.define(
+                MacroDefine::create_const(
+                    match target {
+                        BuildTarget::Emulator => "EMULATOR".into(),
+                        BuildTarget::Hardware => "HARDWARE".into(),
+                    },
+                    "1".into(),
+                ),
+                diag(&mut record_diagnostic),
+            );
+        });
+        state.active_states.extend(new_start_states);
     }
+
     while state.step(&mut record_diagnostic) {}
     state.finished_results
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ParsedCode {
     Byte(u8),
     Short(u16),
     Int(u32),
     Long(u64),
-    Float(f32),
-    Double(f64),
+    Float(OrderedFloat<f32>),
+    Double(OrderedFloat<f64>),
     String(String),
     Asm(String),
 }
 
-#[derive(Clone, Debug)]
-struct ParseState<I> {
-    active_states: Vec<ParseSubState<I>>,
-    new_states: Vec<ParseSubState<I>>,
-    finished_results: Vec<ParsingResult>,
+#[derive(Clone)]
+struct ParseState<'forced, I> {
+    active_states: Vec<ParseSubState<'forced, I>>,
+    new_states: Vec<ParseSubState<'forced, I>>,
+    finished_results: BTreeSet<ParsingResult>,
 }
 
-impl<I> ParseState<I>
+impl<'forced, I> ParseState<'forced, I>
 where
     I: Iterator<Item = PreParsedStatement> + Clone,
 {
-    fn new(statements: I) -> Self {
+    fn new(statements: I, filters: &'forced ForcedBuildOption) -> Self {
         Self {
-            active_states: vec![ParseSubState::new(statements)],
+            active_states: vec![ParseSubState::new(statements, filters)],
             new_states: vec![],
-            finished_results: vec![],
+            finished_results: BTreeSet::new(),
         }
     }
 
@@ -80,6 +120,7 @@ where
                 })
                 .filter_map(|state| {
                     Some(ParsingResult {
+                        build_target: state.build_target,
                         target_build: state.target_build.map(|(bid, _)| bid)?,
                         user_settings: state.user_settings,
                         forced_output_format: state.forced_output_format.map(|(fmt, _)| fmt),
@@ -97,11 +138,13 @@ where
     }
 }
 
-#[derive(Clone, Debug)]
-struct ParseSubState<I> {
+#[derive(Clone)]
+struct ParseSubState<'forced, I> {
     statements: I,
     preprocessor: PreprocessorState,
+    forced: &'forced ForcedBuildOption,
 
+    build_target: BuildTarget,
     target_build: Option<(BuildId, SourceSpan)>,
     pointer_offset: i32,
     user_settings: Vec<Arc<str>>,
@@ -113,19 +156,21 @@ struct ParseSubState<I> {
     code_labels: HashMap<String, (SourceSpan, u32)>,
 }
 
-impl<I> ParseSubState<I>
+impl<'forced, I> ParseSubState<'forced, I>
 where
     I: Iterator<Item = PreParsedStatement> + Clone,
 {
-    fn new(statements: I) -> Self {
+    fn new(statements: I, filters: &'forced ForcedBuildOption) -> Self {
         Self {
             statements,
+            forced: filters,
             preprocessor: PreprocessorState::new(),
-            code_output: vec![],
+            build_target: BuildTarget::Emulator,
             target_build: None,
             pointer_offset: 0,
             user_settings: vec![],
             forced_output_format: None,
+            code_output: vec![],
             code_multi: None,
             code_multi_ended: None,
             code_labels: HashMap::new(),
@@ -134,7 +179,7 @@ where
 
     fn step(
         &mut self,
-        new_states: &mut Vec<ParseSubState<I>>,
+        new_states: &mut Vec<ParseSubState<'forced, I>>,
         mut record_diagnostic: impl FnMut(ParseDiagnostic),
     ) -> bool {
         let Some(statement) = self.statements.next() else {
@@ -155,17 +200,27 @@ where
                             record_diagnostic(ParseDiagnostic::DuplicateBuildId {
                                 at: name_span,
                                 original: original_span,
-                            })
+                            });
                         }
-                        None => self.target_build = Some((option.0, name_span)),
+                        None => {
+                            if let Some(forced) = self.forced.build_id
+                                && option.0 != forced
+                            {
+                                return false;
+                            }
+                            self.target_build = Some((option.0, name_span));
+                        }
                     },
-                    NxpchOption::TargetBuilds(option) => {
+                    NxpchOption::TargetBuilds(mut option) => {
                         if let Some((_, original_span)) = self.target_build {
                             record_diagnostic(ParseDiagnostic::DuplicateBuildId {
                                 at: name_span,
                                 original: original_span,
                             });
                             return true;
+                        }
+                        if let Some(forced) = self.forced.build_id {
+                            option.0.retain(|entry| entry.id == forced);
                         }
                         return self.make_forks(new_states, option.0, |entry, fork| {
                             fork.target_build = Some((entry.id, name_span));
@@ -179,7 +234,12 @@ where
                         self.pointer_offset = option.0;
                         self.end_multi_code(name_span.offset());
                     }
-                    NxpchOption::UserSettings(option) => {
+                    NxpchOption::UserSettings(mut option) => {
+                        if let Some(forced) = self.forced.options.get(self.user_settings.len()..) {
+                            for (forced_value, settings) in forced.iter().zip(&mut option.0) {
+                                settings.retain(|setting| &*setting.name == forced_value);
+                            }
+                        }
                         return self.make_deep_forks(new_states, option.0, |setting, fork| {
                             fork.user_settings.push(setting.name);
                             for define in setting.defines {
@@ -228,7 +288,7 @@ where
                         Ok(offset) => offset,
                         Err(err) => {
                             record_diagnostic(ParseDiagnostic::InvalidCodeOffset {
-                                cause: err,
+                                cause: err.to_string(),
                                 at: offset_span,
                             });
                             return true;
@@ -270,7 +330,7 @@ where
 
     fn make_forks<T>(
         &mut self,
-        new_states: &mut Vec<ParseSubState<I>>,
+        new_states: &mut Vec<ParseSubState<'forced, I>>,
         values: impl IntoIterator<Item = T>,
         mut define_fork: impl FnMut(T, &mut Self),
     ) -> bool {
@@ -289,7 +349,7 @@ where
 
     fn make_deep_forks<T, TS>(
         &mut self,
-        new_states: &mut Vec<ParseSubState<I>>,
+        new_states: &mut Vec<ParseSubState<'forced, I>>,
         values: impl IntoIterator<Item = TS>,
         mut define_fork: impl FnMut(T, &mut Self),
     ) -> bool
@@ -353,7 +413,7 @@ where
         }
         if let Some(directive) = code.strip_prefix('.') {
             let Some((directive, value)) = directive.split_once(' ') else {
-                record_diagnostic(ParseDiagnostic::InvalidLabel {
+                record_diagnostic(ParseDiagnostic::MissingDataValue {
                     at: (source_offset + directive.len()).into(),
                 });
                 return offset;
@@ -373,7 +433,7 @@ where
                                 Ok(value) => value,
                                 Err(err) => {
                                     record_diagnostic(ParseDiagnostic::InvalidInteger {
-                                        cause: err,
+                                        cause: err.to_string(),
                                         at: value_span,
                                     });
                                     0
@@ -388,13 +448,13 @@ where
                 ($variant:ident $bits:literal) => {
                     (
                         ParsedCode::$variant(match parse_int::parse(value) {
-                            Ok(value) => value,
+                            Ok(value) => OrderedFloat(value),
                             Err(err) => {
                                 record_diagnostic(ParseDiagnostic::InvalidFloat {
                                     cause: err.to_string(),
                                     at: value_span,
                                 });
-                                0.0
+                                OrderedFloat(0.0)
                             }
                         }),
                         $bits / 8,
@@ -418,7 +478,7 @@ where
                                     None => (value_span.offset() + value_span.len(), 0),
                                 }
                                 .into(),
-                                cause: err,
+                                cause: err.to_string(),
                             });
                             "".to_string()
                         }
@@ -446,11 +506,10 @@ where
     }
 }
 
-fn parse_maybe_signed<U: Unsigned, S: Signed>(input: &str) -> Result<U, ParseIntError>
+fn parse_maybe_signed<U, S>(input: &str) -> Result<U, ParseIntError>
 where
-    U: Num<FromStrRadixErr = ParseIntError> + PrimInt,
-    S: Num<FromStrRadixErr = ParseIntError> + PrimInt,
-    S: AsNum<U>,
+    U: Num<FromStrRadixErr = ParseIntError> + Unsigned,
+    S: Num<FromStrRadixErr = ParseIntError> + Signed + AsNum<U>,
 {
     match parse_int::parse::<S>(input) {
         Ok(x) => Ok(x.as_num()),
@@ -464,7 +523,7 @@ where
     }
 }
 
-#[derive(Debug, Diagnostic, Error)]
+#[derive(Debug, PartialEq, Eq, Hash, Diagnostic, Error)]
 pub enum ParseDiagnostic {
     #[error("Build ID specified more than once")]
     #[diagnostic(code(parse::duplicate_build_id))]
@@ -492,7 +551,7 @@ pub enum ParseDiagnostic {
     #[error("Invalid code offset")]
     #[diagnostic(code(parse::invalid_code_offset))]
     InvalidCodeOffset {
-        cause: ParseIntError,
+        cause: String,
 
         #[label("{cause}")]
         at: SourceSpan,
@@ -544,7 +603,7 @@ pub enum ParseDiagnostic {
     #[error("Invalid integer in data directive")]
     #[diagnostic(code(parse::invalid_integer))]
     InvalidInteger {
-        cause: ParseIntError,
+        cause: String,
 
         #[label("{cause}")]
         at: SourceSpan,
@@ -562,7 +621,7 @@ pub enum ParseDiagnostic {
     #[error("Invalid string in data directive")]
     #[diagnostic(code(parse::invalid_float))]
     InvalidString {
-        cause: json5::Error,
+        cause: String,
 
         #[label("{cause}")]
         at: SourceSpan,

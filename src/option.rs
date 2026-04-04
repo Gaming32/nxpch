@@ -173,7 +173,7 @@ pub struct UserSetting {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OutputFormatOption(pub OutputFormat);
 
-#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputFormat {
     Ips,

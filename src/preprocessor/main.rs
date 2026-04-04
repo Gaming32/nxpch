@@ -98,7 +98,7 @@ impl PreprocessorDirective {
                         record_diagnostic(PreprocessorDiagnostic::InvalidString {
                             keyword: $what,
                             at: json5_error_to_offset(&err, body, body_base_offset),
-                            cause: err,
+                            cause: err.to_string(),
                         });
                         None
                     }
@@ -350,7 +350,7 @@ impl PreprocessorState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Diagnostic, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Diagnostic, Error)]
 pub enum PreprocessorDiagnostic {
     #[error("{message}")]
     #[diagnostic(code(preprocessor::user_warning), severity(warn))]
@@ -388,8 +388,7 @@ pub enum PreprocessorDiagnostic {
     InvalidString {
         keyword: &'static str,
 
-        #[source]
-        cause: json5::Error,
+        cause: String,
         #[label("{cause}")]
         at: SourceOffset,
     },

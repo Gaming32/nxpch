@@ -21,6 +21,16 @@ pub struct MacroDefine {
 impl MacroDefine {
     pub const NAME_REGEX: ere::Regex = ere::compile_regex!("[a-zA-Z_][a-zA-Z0-9_]*");
 
+    pub fn create_const(name: String, expansion: String) -> Self {
+        Self {
+            declaration_range: (0, name.len()).into(),
+            expansion_offset: (name.len() + 1).into(),
+            name,
+            expansion,
+            args: None,
+        }
+    }
+
     pub fn parse(
         s: &str,
         offset: usize,
@@ -249,7 +259,7 @@ impl FromStr for MacroDefine {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Diagnostic, Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Diagnostic, Error)]
 pub enum MacroDiagnostic {
     #[error("Invalid macro syntax")]
     #[diagnostic(code(preprocessor::macros::invalid))]
