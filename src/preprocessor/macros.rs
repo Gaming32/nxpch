@@ -1,5 +1,5 @@
 use crate::utils::Combine;
-use miette::{Diagnostic, SourceSpan};
+use miette::{Diagnostic, SourceOffset, SourceSpan};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -14,8 +14,8 @@ pub struct MacroDefine {
     pub name: String,
     pub args: Option<Vec<String>>,
     pub expansion: String,
-    pub declaration_range: (usize, usize),
-    pub expansion_offset: usize,
+    pub declaration_range: SourceSpan,
+    pub expansion_offset: SourceOffset,
 }
 
 impl MacroDefine {
@@ -31,7 +31,7 @@ impl MacroDefine {
         )
         .exec(s) else {
             record_diagnostic(MacroDiagnostic::InvalidMacro {
-                at: (offset, s.len()),
+                at: (offset, s.len()).into(),
             });
             return None;
         };
@@ -52,7 +52,7 @@ impl MacroDefine {
                         let arg = arg.trim();
                         if !ere::compile_regex!("^[a-zA-Z_][a-zA-Z0-9_]*$").test(arg) {
                             record_diagnostic(MacroDiagnostic::InvalidArg {
-                                at: (offset + s.subslice_offset(arg).unwrap(), arg.len()),
+                                at: (offset + s.subslice_offset(arg).unwrap(), arg.len()).into(),
                             });
                         }
                         arg.to_string()
@@ -60,8 +60,8 @@ impl MacroDefine {
                     .collect()
             }),
             expansion: expansion.to_string(),
-            declaration_range: (offset, declaration_end),
-            expansion_offset: offset + s.subslice_offset(expansion).unwrap(),
+            declaration_range: (offset, declaration_end).into(),
+            expansion_offset: (offset + s.subslice_offset(expansion).unwrap()).into(),
         })
     }
 
@@ -74,7 +74,7 @@ impl MacroDefine {
             return None;
         }
         let mut result = Cow::Borrowed(self.expansion.as_str());
-        let mut result_range = Self::len_vec(self.expansion_offset, self.expansion.len());
+        let mut result_range = Self::len_vec(self.expansion_offset.offset(), self.expansion.len());
         if let Some(arg_values) = arg_values {
             let arg_map = self
                 .args
@@ -129,7 +129,7 @@ impl MacroDefine {
                 record_diagnostic(MacroDiagnostic::WrongNumberOfMacroArgs {
                     expected: used_macro.args.as_ref().unwrap().len(),
                     found: args.unwrap().len(),
-                    call_site: (offsets[call_range.start], call_range.len()),
+                    call_site: (offsets[call_range.start], call_range.len()).into(),
                     declaration_site: used_macro.declaration_range,
                 });
                 skip_index = call_range.end;
@@ -255,14 +255,14 @@ pub enum MacroDiagnostic {
     #[diagnostic(code(preprocessor::macros::invalid))]
     InvalidMacro {
         #[label(r#"Macros should follow the format "MACRO_NAME", "MACRO_NAME expansion", or "MACRO_NAME(arg1, arg2) expansion""#)]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("Invalid macro argument")]
     #[diagnostic(code(preprocessor::macros::invalid_arg))]
     InvalidArg {
         #[label(r#"Should only contain ASCII letters, numbers, and _"#)]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("Wrong number of macro arguments. Expected {expected}, but received {found}.")]
@@ -272,9 +272,9 @@ pub enum MacroDiagnostic {
         found: usize,
 
         #[label("Expected {expected} arguments")]
-        call_site: (usize, usize),
+        call_site: SourceSpan,
         #[label("Macro declared here")]
-        declaration_site: (usize, usize),
+        declaration_site: SourceSpan,
     },
 }
 
@@ -303,8 +303,8 @@ mod test {
                 name: "MACRO_NAME".to_string(),
                 args: None,
                 expansion: "".to_string(),
-                declaration_range: (0, 10),
-                expansion_offset: 10,
+                declaration_range: (0, 10).into(),
+                expansion_offset: 10.into(),
             }),
         );
         assert_eq!(
@@ -313,8 +313,8 @@ mod test {
                 name: "MACRO_NAME".to_string(),
                 args: None,
                 expansion: "expansion".to_string(),
-                declaration_range: (0, 10),
-                expansion_offset: 11,
+                declaration_range: (0, 10).into(),
+                expansion_offset: 11.into(),
             }),
         );
         assert_eq!(
@@ -323,8 +323,8 @@ mod test {
                 name: "MACRO_NAME".to_string(),
                 args: Some(vec![]),
                 expansion: "another".to_string(),
-                declaration_range: (0, 12),
-                expansion_offset: 13,
+                declaration_range: (0, 12).into(),
+                expansion_offset: 13.into(),
             }),
         );
         assert_eq!(
@@ -333,8 +333,8 @@ mod test {
                 name: "MACRO_NAME".to_string(),
                 args: Some(vec!["arg1".to_string(), "arg2".to_string()]),
                 expansion: "expansion".to_string(),
-                declaration_range: (0, 22),
-                expansion_offset: 23,
+                declaration_range: (0, 22).into(),
+                expansion_offset: 23.into(),
             }),
         );
     }
@@ -343,13 +343,15 @@ mod test {
     fn test_parse_failure() {
         assert_eq!(
             parse_in_place("general: invalidity"),
-            Err(vec![MacroDiagnostic::InvalidMacro { at: (0, 19) }]),
+            Err(vec![MacroDiagnostic::InvalidMacro { at: (0, 19).into() }]),
         );
         assert_eq!(
             parse_in_place("INVALID_ARGUMENT(arg with space,)"),
             Err(vec![
-                MacroDiagnostic::InvalidArg { at: (17, 14) },
-                MacroDiagnostic::InvalidArg { at: (32, 0) },
+                MacroDiagnostic::InvalidArg {
+                    at: (17, 14).into(),
+                },
+                MacroDiagnostic::InvalidArg { at: (32, 0).into() },
             ]),
         );
     }
@@ -554,8 +556,8 @@ mod test {
                 vec![MacroDiagnostic::WrongNumberOfMacroArgs {
                     expected: 1,
                     found: 2,
-                    call_site: (104, 23),
-                    declaration_site: (0, 14),
+                    call_site: (104, 23).into(),
+                    declaration_site: (0, 14).into(),
                 }],
                 MacroDefine::len_vec(100, 31),
             ),
@@ -589,8 +591,8 @@ mod test {
                 vec![MacroDiagnostic::WrongNumberOfMacroArgs {
                     expected: 2,
                     found: 1,
-                    call_site: (159, 18),
-                    declaration_site: (0, 27),
+                    call_site: (159, 18).into(),
+                    declaration_site: (0, 27).into(),
                 }],
                 [
                     MacroDefine::len_vec(13, 9).as_slice(),

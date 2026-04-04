@@ -1,7 +1,7 @@
 use crate::preprocessor::expr::{ExprDiagnostic, evaluate};
 use crate::preprocessor::{MacroDefine, MacroDiagnostic};
 use crate::utils::{Combine, json5_error_to_offset};
-use miette::{Diagnostic, SourceSpan};
+use miette::{Diagnostic, SourceOffset, SourceSpan};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use subslice_offset::SubsliceOffset;
@@ -58,7 +58,7 @@ impl PreprocessorDirective {
                 } else {
                     record_diagnostic(PreprocessorDiagnostic::MissingArgument {
                         keyword: $what,
-                        at: body_base_offset,
+                        at: body_base_offset.into(),
                     });
                     None
                 }
@@ -71,7 +71,7 @@ impl PreprocessorDirective {
                 } else {
                     record_diagnostic(PreprocessorDiagnostic::UnexpectedArgument {
                         keyword: $what,
-                        at: (body_base_offset, body.len()),
+                        at: (body_base_offset, body.len()).into(),
                     });
                     None
                 }
@@ -84,7 +84,7 @@ impl PreprocessorDirective {
                 } else {
                     record_diagnostic(PreprocessorDiagnostic::InvalidVarName {
                         keyword: $what,
-                        at: (body_base_offset, body.len()),
+                        at: (body_base_offset, body.len()).into(),
                     });
                     None
                 }
@@ -126,7 +126,7 @@ impl PreprocessorDirective {
             _ => {
                 record_diagnostic(PreprocessorDiagnostic::UnknownDirective {
                     directive: keyword.to_string(),
-                    at: (offset, keyword.len()),
+                    at: (offset, keyword.len()).into(),
                 });
                 None
             }
@@ -294,7 +294,7 @@ impl PreprocessorState {
                     record_diagnostic(PreprocessorDiagnostic::DuplicateDefine {
                         name: old.name,
                         at: directive.keyword_span.combine(new_define),
-                        original: old.declaration_range.into(),
+                        original: old.declaration_range,
                     });
                 }
             }
@@ -319,7 +319,7 @@ impl PreprocessorState {
     ) {
         self.exec(
             PreprocessorDirective {
-                keyword_span: define.declaration_range.0.into(),
+                keyword_span: define.declaration_range.offset().into(),
                 body_span: define.full_span(),
                 instruction: PreprocessorDirectiveInstruction::Define(define),
             },
@@ -362,7 +362,7 @@ pub enum PreprocessorDiagnostic {
         keyword: &'static str,
 
         #[label("Expected argument")]
-        at: usize,
+        at: SourceOffset,
     },
 
     #[error("#{keyword} takes no body")]
@@ -371,7 +371,7 @@ pub enum PreprocessorDiagnostic {
         keyword: &'static str,
 
         #[label("Should not be present")]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("#{keyword} expects a single var name")]
@@ -380,7 +380,7 @@ pub enum PreprocessorDiagnostic {
         keyword: &'static str,
 
         #[label("Invalid variable name")]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("#{keyword} expects a single string")]
@@ -391,7 +391,7 @@ pub enum PreprocessorDiagnostic {
         #[source]
         cause: json5::Error,
         #[label("{cause}")]
-        at: usize,
+        at: SourceOffset,
     },
 
     #[error("Unknown directive {directive}")]
@@ -400,7 +400,7 @@ pub enum PreprocessorDiagnostic {
         directive: String,
 
         #[label("Unknown directive")]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("#{keyword} without an #if")]

@@ -73,8 +73,13 @@ impl NxpchOption {
                                 + SourceOffset::from_location(json, location.line, location.column)
                                     .offset()
                                 + 1;
-                            define.declaration_range.0 += offset;
-                            define.expansion_offset += offset;
+                            define.declaration_range = (
+                                define.declaration_range.offset() + offset,
+                                define.declaration_range.len(),
+                            )
+                                .into();
+                            define.expansion_offset =
+                                (define.expansion_offset.offset() + offset).into();
                         }
                     }
                 }
@@ -113,8 +118,13 @@ impl NxpchOption {
                                     )
                                     .offset()
                                     + 1;
-                                define.declaration_range.0 += offset;
-                                define.expansion_offset += offset;
+                                define.declaration_range = (
+                                    define.declaration_range.offset() + offset,
+                                    define.declaration_range.len(),
+                                )
+                                    .into();
+                                define.expansion_offset =
+                                    (define.expansion_offset.offset() + offset).into();
                             }
                         }
                     }

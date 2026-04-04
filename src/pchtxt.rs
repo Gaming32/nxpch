@@ -1,7 +1,7 @@
 use crate::output::PatchVec;
 use capstone::arch::arm64::ArchMode;
 use capstone::prelude::{BuildsCapstone, Capstone};
-use miette::Diagnostic;
+use miette::{Diagnostic, SourceOffset, SourceSpan};
 use std::fmt::Write;
 use std::iter::Enumerate;
 use std::num::ParseIntError;
@@ -25,7 +25,7 @@ pub fn pchtxt_to_patches(pchtxt: &str) -> ((PatchVec, u128), Vec<PchtxtDianostic
             PchtxtLineData::BuildId(bid) => build_id = Some(bid),
             PchtxtLineData::Information => diags.push(PchtxtDianostic::Information {
                 message: line.line.to_string(),
-                at: (line.line_start, line.line.len()),
+                at: (line.line_start, line.line.len()).into(),
             }),
             PchtxtLineData::Comment => last_comment = line.line,
             PchtxtLineData::BigEndian => {}
@@ -34,7 +34,7 @@ pub fn pchtxt_to_patches(pchtxt: &str) -> ((PatchVec, u128), Vec<PchtxtDianostic
                 enabled = true;
                 diags.push(PchtxtDianostic::PatchEnabled {
                     message: last_comment.to_string(),
-                    at: (line.line_start, line.line.len()),
+                    at: (line.line_start, line.line.len()).into(),
                 });
             }
             PchtxtLineData::Flag(PchtxtFlag::PrintValues) => {}
@@ -46,7 +46,7 @@ pub fn pchtxt_to_patches(pchtxt: &str) -> ((PatchVec, u128), Vec<PchtxtDianostic
                     let offset = offset.checked_add_signed(offset_shift).unwrap_or_else(|| {
                         diags.push(PchtxtDianostic::OverUnderFlow {
                             offset_shift,
-                            at: (line.line_start, 8),
+                            at: (line.line_start, 8).into(),
                         });
                         offset.wrapping_add_signed(offset_shift)
                     });
@@ -138,7 +138,7 @@ pub fn pchtxt_to_nxpch(pchtxt: &str) -> (String, Vec<PchtxtDianostic>) {
             PchtxtLineData::Flag(PchtxtFlag::OffsetShift(shift)) => {
                 if status == Status::Disabled {
                     diags.push(PchtxtDianostic::DisabledPointerOffset {
-                        at: (line.line_start, line.line.len()),
+                        at: (line.line_start, line.line.len()).into(),
                     });
                 }
                 let _ = write!(output, "pointer_offset = 0x{shift:X}");
@@ -264,7 +264,7 @@ pub enum PchtxtDianostic {
     Information {
         message: String,
         #[label]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("Patch read: {message}")]
@@ -272,21 +272,21 @@ pub enum PchtxtDianostic {
     PatchEnabled {
         message: String,
         #[label]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("Unexpected unicode")]
     #[diagnostic(code(pchtxt::unexpected_unicode))]
     UnexpectedUnicode {
         #[label]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("Big-Endian is no longer supported. Proceeding as little-endian.")]
     #[diagnostic(code(pchtxt::big_endian), severity(warn))]
     BigEndian {
         #[label]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("Over/underflow from adding offset_shift")]
@@ -295,7 +295,7 @@ pub enum PchtxtDianostic {
         offset_shift: i32,
 
         #[label("Current offset shift is 0x{offset_shift:X}")]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error(
@@ -312,7 +312,7 @@ pub enum PchtxtDianostic {
     )]
     DisabledPointerOffset {
         #[label]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("Missing @nsobid")]
@@ -326,14 +326,14 @@ pub enum PchtxtDianostic {
         cause: ParseIntError,
 
         #[label("{cause}")]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("Unknown flag")]
     #[diagnostic(code(pchtxt::unknown_flag))]
     UnknownFlag {
         #[label]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("Invalid offset")]
@@ -343,28 +343,28 @@ pub enum PchtxtDianostic {
         cause: ParseIntError,
 
         #[label("{cause}")]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 
     #[error("Unterminated string literal")]
     #[diagnostic(code(pchtxt::unterminated_string))]
     UnterminatedStringLiteral {
         #[label("Expected \"")]
-        at: usize,
+        at: SourceOffset,
     },
 
     #[error("Odd number of characters in hex value")]
     #[diagnostic(code(pchtxt::odd_hex_value_len))]
     OddHexValueLength {
-        #[label("{} characters long", at.1)]
-        at: (usize, usize),
+        #[label("{} characters long", at.len())]
+        at: SourceSpan,
     },
 
     #[error("Hex value is not hex")]
     #[diagnostic(code(pchtxt::invalid_hex_value))]
     InvalidHexValue {
         #[label("Should be hex")]
-        at: (usize, usize),
+        at: SourceSpan,
     },
 }
 
@@ -412,7 +412,7 @@ impl<'a> Iterator for PchtxtParseIter<'a> {
                 Err(err) => {
                     diag = Some(PchtxtDianostic::InvalidBuildId {
                         cause: err,
-                        at: (line_start + 8, hex_len),
+                        at: (line_start + 8, hex_len).into(),
                     });
                     0
                 }
@@ -431,7 +431,7 @@ impl<'a> Iterator for PchtxtParseIter<'a> {
             b'@' => match line.as_bytes()[1] {
                 b'b' | b'B' => {
                     diag = Some(PchtxtDianostic::BigEndian {
-                        at: (line_start, line.len()),
+                        at: (line_start, line.len()).into(),
                     });
                     (
                         PchtxtLineData::BigEndian,
@@ -462,7 +462,7 @@ impl<'a> Iterator for PchtxtParseIter<'a> {
                     } else {
                         if line.len() < flag_name.len() + 8 {
                             diag = Some(PchtxtDianostic::UnknownFlag {
-                                at: (line_start + 6, flag_name.len()),
+                                at: (line_start + 6, flag_name.len()).into(),
                             });
                             break 'parse_flag (PchtxtLineData::Ignored, line);
                         }
@@ -481,7 +481,7 @@ impl<'a> Iterator for PchtxtParseIter<'a> {
                             )
                         } else {
                             diag = Some(PchtxtDianostic::UnknownFlag {
-                                at: (line_start + 6, flag_name.len()),
+                                at: (line_start + 6, flag_name.len()).into(),
                             });
                             (PchtxtLineData::Ignored, line)
                         }
@@ -508,7 +508,7 @@ impl<'a> Iterator for PchtxtParseIter<'a> {
                     Err(err) => {
                         diag = Some(PchtxtDianostic::InvalidOffset {
                             cause: err,
-                            at: (line_start, 8),
+                            at: (line_start, 8).into(),
                         });
                         break 'parse_patch (PchtxtLineData::Ignored, line);
                     }
@@ -517,7 +517,7 @@ impl<'a> Iterator for PchtxtParseIter<'a> {
                 if !line.is_char_boundary(9) {
                     let offset = line.floor_char_boundary(9);
                     diag = Some(PchtxtDianostic::UnexpectedUnicode {
-                        at: (line_start + offset, line.ceil_char_boundary(9) - offset),
+                        at: (line_start + offset, line.ceil_char_boundary(9) - offset).into(),
                     });
                     break 'parse_patch (PchtxtLineData::Ignored, line);
                 }
@@ -532,7 +532,7 @@ impl<'a> Iterator for PchtxtParseIter<'a> {
                         .map(|x| &value_str.as_bytes()[1..x + 2]);
                     let Some(value) = value else {
                         diag = Some(PchtxtDianostic::UnterminatedStringLiteral {
-                            at: line_start + line.len(),
+                            at: (line_start + line.len()).into(),
                         });
                         break 'parse_patch (PchtxtLineData::Ignored, line);
                     };
@@ -571,7 +571,7 @@ impl<'a> Iterator for PchtxtParseIter<'a> {
                     };
                     if value.len() % 2 != 0 {
                         diag = Some(PchtxtDianostic::OddHexValueLength {
-                            at: (line_start + 9, value.len()),
+                            at: (line_start + 9, value.len()).into(),
                         });
                         break 'parse_patch (PchtxtLineData::Ignored, line);
                     }
@@ -581,7 +581,7 @@ impl<'a> Iterator for PchtxtParseIter<'a> {
                         .position(|&x| !x.is_ascii_hexdigit())
                     {
                         diag = Some(PchtxtDianostic::InvalidHexValue {
-                            at: (line_start + 9 + non_hex, 1),
+                            at: (line_start + 9 + non_hex, 1).into(),
                         });
                         break 'parse_patch (PchtxtLineData::Ignored, line);
                     }
@@ -638,7 +638,8 @@ fn cut_out_value<'a>(
             at: (
                 offset + char_floor,
                 s.ceil_char_boundary(start + len) - char_floor,
-            ),
+            )
+                .into(),
         });
     }
     result
@@ -677,11 +678,4 @@ enum PchtxtLineData {
 enum PchtxtFlag {
     PrintValues,
     OffsetShift(i32),
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum PchtxtParseState {
-    Enabled,
-    Disabled,
-    Stopped,
 }

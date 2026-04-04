@@ -8,7 +8,7 @@ pub fn json5_error_to_offset(
     error: &json5::Error,
     source_string: &str,
     base_offset: usize,
-) -> usize {
+) -> SourceOffset {
     match error.position() {
         Some(pos) => {
             base_offset
@@ -28,6 +28,7 @@ pub fn json5_error_to_offset(
             _ => base_offset,
         },
     }
+    .into()
 }
 
 pub fn all_but_last_assert<I>(mut iter: I, last_should_be: I::Item) -> I

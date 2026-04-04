@@ -1,7 +1,7 @@
 use crate::option::{NxpchOption, OptionParseError};
 use crate::preprocessor::{PreprocessorDiagnostic, PreprocessorDirective};
 use crate::utils::json5_error_to_offset;
-use miette::{Diagnostic, SourceSpan};
+use miette::{Diagnostic, SourceOffset, SourceSpan};
 use std::ops::Range;
 use std::sync::Arc;
 use subslice_offset::SubsliceOffset;
@@ -170,7 +170,7 @@ pub enum PreParseDiagnostic {
         #[source]
         cause: json5::Error,
         #[label("{cause}")]
-        at: usize,
+        at: SourceOffset,
     },
 
     #[error("Unknown option {option}")]

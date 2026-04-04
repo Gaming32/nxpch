@@ -1,5 +1,5 @@
 use logos::{Logos, Span, SpannedIter};
-use miette::Diagnostic;
+use miette::{Diagnostic, SourceOffset};
 use std::iter::Peekable;
 use std::num::ParseIntError;
 use std::ops::Range;
@@ -121,7 +121,7 @@ pub fn evaluate<M: Fn(&str) -> bool>(
                 }),
                 Ok(Err(None)) => Err(ExprDiagnostic::Eol {
                     expected: $message,
-                    at: 0, // Real value is filled in later
+                    at: 0.into(), // Real value is filled in later
                 }),
                 Err(err) => Err(err),
             }
@@ -335,7 +335,7 @@ pub fn evaluate<M: Fn(&str) -> bool>(
             }
         }
         Err(ExprDiagnostic::Eol { at, .. }) => {
-            *at = offsets.last().copied().unwrap_or_default();
+            *at = offsets.last().copied().unwrap_or_default().into();
         }
         Ok(_) => {}
     }
@@ -384,7 +384,7 @@ pub enum ExprDiagnostic {
         expected: &'static str,
 
         #[label("Expected {expected}")]
-        at: usize,
+        at: SourceOffset,
     },
 
     #[error("Unknown builtin function in #if expression")]
@@ -461,7 +461,7 @@ mod test {
             eval("(0"),
             Err(ExprDiagnostic::Eol {
                 expected: "end parenthesis after sub-expression",
-                at: 1,
+                at: 1.into(),
             })
         );
     }
