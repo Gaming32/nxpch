@@ -1,4 +1,5 @@
-use miette::Diagnostic;
+use crate::utils::Combine;
+use miette::{Diagnostic, SourceSpan};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -194,6 +195,11 @@ impl MacroDefine {
                 }),
             ));
         }
+    }
+
+    pub fn full_span(&self) -> SourceSpan {
+        self.declaration_range
+            .combine((self.expansion_offset, self.expansion.len()))
     }
 
     // pub(super) for testing

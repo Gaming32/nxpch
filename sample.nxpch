@@ -6,41 +6,38 @@ target_build = 0xF18FF3CFCBAD0884D72ABBEB6C540D6B
 
 user_settings = [
 	// Difficulties
-	{
-		layer: 0,
-		name: 'Hard (10 HP)',
-		defines: ['MAX_HEALTH 100'],
-	},
-	{
-		layer: 0,
-		name: 'Extreme (0.1 HP)',
-		defines: ['MAX_HEALTH 1'],
-	},
-	{
-		layer: 0,
-		name: 'Easy (30 HP)',
-		defines: ['MAX_HEALTH 300'],
-	},
-	{
-		layer: 0,
-		name: 'Very Easy (50 HP)',
-		defines: ['MAX_HEALTH 500'],
-	},
+	[
+		{
+			name: 'Hard (10 HP)',
+			defines: ['MAX_HEALTH 100'],
+		},
+		{
+			name: 'Extreme (0.1 HP)',
+			defines: ['MAX_HEALTH 1'],
+		},
+		{
+			name: 'Easy (30 HP)',
+			defines: ['MAX_HEALTH 300'],
+		},
+		{
+			name: 'Very Easy (50 HP)',
+			defines: ['MAX_HEALTH 500'],
+		},
+	],
 	// Armor behaviors
-	{
-		layer: 1,
-		name: 'Disable Armor',
-		defines: ['ARMOR_DISABLE'],
-	},
-	{
-		layer: 1,
-		name: 'Lethal Armor',
-		defines: ['ARMOR_LETHAL'],
-	},
-	{
-		layer: 1,
-		name: 'Extra Hit (Vanilla)',
-	},
+	[
+		{
+			name: 'Disable Armor',
+			defines: ['ARMOR_DISABLE'],
+		},
+		{
+			name: 'Lethal Armor',
+			defines: ['ARMOR_LETHAL'],
+		},
+		{
+			name: 'Extra Hit (Vanilla)',
+		},
+	],
 ]
 
 // Cmn::Def::Mission::getArmorLevelMax

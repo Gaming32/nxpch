@@ -1,8 +1,9 @@
 use crate::preprocessor::MacroDefine;
+use crate::utils::closest_key;
 use json5_nodes::JsonNode;
 use miette::SourceOffset;
 use serde::{Deserialize, Serialize};
-use strsim::damerau_levenshtein;
+use std::sync::Arc;
 use thiserror::Error;
 
 #[derive(Clone, Debug)]
@@ -24,16 +25,16 @@ impl NxpchOption {
             "output_format" => NxpchOption::OutputFormat(json5::from_str(content)?),
             _ => {
                 return Err(OptionParseError::UnknownOption {
-                    closest: [
-                        "target_build",
-                        "target_builds",
-                        "pointer_offset",
-                        "user_settings",
-                        "output_format",
-                    ]
-                    .into_iter()
-                    .min_by_key(|x| damerau_levenshtein(x, option_name))
-                    .unwrap(),
+                    closest: closest_key(
+                        option_name,
+                        [
+                            "target_build",
+                            "target_builds",
+                            "pointer_offset",
+                            "user_settings",
+                            "output_format",
+                        ],
+                    ),
                 });
             }
         })
@@ -85,26 +86,36 @@ impl NxpchOption {
                     _ => mismatch!(),
                 };
                 for (setting, node) in settings.0.iter_mut().zip(nodes) {
-                    let defines_node = match node {
-                        JsonNode::Object(mut obj, _) => match obj.remove("defines") {
-                            Some(JsonNode::Array(defines, _)) => defines,
-                            None => vec![],
-                            _ => mismatch!(),
-                        },
+                    let nodes = match node {
+                        JsonNode::Array(array, _) => array,
                         _ => mismatch!(),
                     };
-                    for (define, node) in setting.defines.iter_mut().zip(defines_node) {
-                        let location = match node {
-                            JsonNode::String(_, loc) => loc,
+                    for (setting_value, node) in setting.iter_mut().zip(nodes) {
+                        let defines_node = match node {
+                            JsonNode::Object(mut obj, _) => match obj.remove("defines") {
+                                Some(JsonNode::Array(defines, _)) => defines,
+                                None => vec![],
+                                _ => mismatch!(),
+                            },
                             _ => mismatch!(),
                         };
-                        if let Some(location) = location {
-                            let offset = start_offset
-                                + SourceOffset::from_location(json, location.line, location.column)
+                        for (define, node) in setting_value.defines.iter_mut().zip(defines_node) {
+                            let location = match node {
+                                JsonNode::String(_, loc) => loc,
+                                _ => mismatch!(),
+                            };
+                            if let Some(location) = location {
+                                let offset = start_offset
+                                    + SourceOffset::from_location(
+                                        json,
+                                        location.line,
+                                        location.column,
+                                    )
                                     .offset()
-                                + 1;
-                            define.declaration_range.0 += offset;
-                            define.expansion_offset += offset;
+                                    + 1;
+                                define.declaration_range.0 += offset;
+                                define.expansion_offset += offset;
+                            }
                         }
                     }
                 }
@@ -125,10 +136,10 @@ pub enum OptionParseError {
 pub type BuildId = u128;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TargetBuildOption(BuildId);
+pub struct TargetBuildOption(pub BuildId);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct TargetBuildsOption(Vec<TargetBuildMatrixEntry>);
+pub struct TargetBuildsOption(pub Vec<TargetBuildMatrixEntry>);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TargetBuildMatrixEntry {
@@ -137,21 +148,20 @@ pub struct TargetBuildMatrixEntry {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PointerOffsetOption(i32);
+pub struct PointerOffsetOption(pub i32);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct UserSettingsOption(Vec<UserSetting>);
+pub struct UserSettingsOption(pub Vec<Vec<UserSetting>>);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserSetting {
-    pub layer: u8,
-    pub name: String,
+    pub name: Arc<str>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub defines: Vec<MacroDefine>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct OutputFormatOption(OutputFormat);
+pub struct OutputFormatOption(pub OutputFormat);
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

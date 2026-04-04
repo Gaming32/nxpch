@@ -312,6 +312,21 @@ impl PreprocessorState {
         }
     }
 
+    pub fn define(
+        &mut self,
+        define: MacroDefine,
+        record_diagnostic: impl FnMut(PreprocessorDiagnostic),
+    ) {
+        self.exec(
+            PreprocessorDirective {
+                keyword_span: define.declaration_range.0.into(),
+                body_span: define.full_span(),
+                instruction: PreprocessorDirectiveInstruction::Define(define),
+            },
+            record_diagnostic,
+        );
+    }
+
     /// Resets the preprocessor to a fresh state, emitting any preprocessor::unterminated errors on
     /// the way.
     pub fn end(&mut self, mut record_diagnostic: impl FnMut(PreprocessorDiagnostic)) {

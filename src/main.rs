@@ -1,6 +1,7 @@
 use crate::output::{generate_ips, generate_pchtxt};
-use crate::parse::PreParsedCode;
+use crate::parse::parse_statements;
 use crate::pchtxt::{pchtxt_to_nxpch, pchtxt_to_patches};
+use crate::pre_parse::PreParsedCode;
 use clap::{Parser, Subcommand};
 use clap_stdin::{FileOrStdin, FileOrStdout};
 use keystone::{Arch, Keystone, Mode};
@@ -13,6 +14,7 @@ mod option;
 mod output;
 mod parse;
 mod pchtxt;
+mod pre_parse;
 mod preprocessor;
 mod utils;
 
@@ -67,14 +69,22 @@ enum PchtxtCommands {
 }
 
 fn main() -> miette::Result<()> {
-    let args = RootArgs::parse();
+    let args = RootArgs::parse_from(["nxpch.exe", "build", "sample.nxpch"]);
     match args.command {
         Commands::Build { source } => {
-            let (_, _, pre_parsed_statements) = parse_source_code(source, |src| {
+            let (filename, source, pre_parsed_statements) = parse_source_code(source, |src| {
                 let parsed = PreParsedCode::parse(src);
                 (parsed.statements, parsed.diagnostics)
             })?;
-            println!("{:#?}", pre_parsed_statements);
+            let mut errors = 0;
+            let generated_results = parse_statements(
+                pre_parsed_statements.into_iter().map(|(_, s)| s),
+                [],
+                |diag| {
+                    errors += print_diags(vec![diag], &filename, &source);
+                },
+            );
+            println!("{:#?}", generated_results);
         }
         Commands::Import(ImportCommands::Pchtxt { source, output }) => {
             let (_, _, nxpch) = parse_source_code(source, pchtxt_to_nxpch)?;
@@ -121,11 +131,8 @@ where
         .into_diagnostic()
         .with_context(|| format!("Reading file {filename}"))?;
     let (parsed, diags) = parser(&raw_source);
-    let failure_count = print_diags(diags, &filename, &raw_source);
-    if failure_count > 0 {
-        eprintln!("Build failed with {failure_count} error(s)");
-        process::exit(failure_count);
-    }
+    let error_count = print_diags(diags, &filename, &raw_source);
+    check_error_count(error_count);
     Ok((filename, raw_source, parsed))
 }
 
@@ -149,17 +156,17 @@ fn print_diags(
     diags: Vec<impl Diagnostic + Send + Sync + 'static>,
     filename: &str,
     source: &str,
-) -> i32 {
+) -> usize {
     if diags.is_empty() {
         return 0;
     }
     let source_code = Arc::new(NamedSource::new(filename, source.to_string()));
     let reporter = GraphicalReportHandler::new();
     let mut message = String::new();
-    let mut error_count = 0i32;
+    let mut error_count = 0;
     for diag in diags {
         if diag.severity().is_none_or(|x| x == Severity::Error) {
-            error_count = error_count.saturating_add(1);
+            error_count += 1;
         }
         let report = miette::Report::new(diag).with_source_code(source_code.clone());
         let _ = reporter.render_report(&mut message, &*report);
@@ -167,6 +174,13 @@ fn print_diags(
         message.clear();
     }
     error_count
+}
+
+fn check_error_count(error_count: usize) {
+    if error_count > 0 {
+        eprintln!("Build failed due to {error_count} error(s)");
+        process::exit(error_count.try_into().unwrap_or(i32::MAX))
+    }
 }
 
 fn fiddle() {

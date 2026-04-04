@@ -104,7 +104,11 @@ pub fn pchtxt_to_nxpch(pchtxt: &str) -> (String, Vec<PchtxtDianostic>) {
             }
             PchtxtLineData::Information => {
                 // #warning is the closest thing we can get unfortunately
-                let _ = writeln!(output, "#warning \"{}\"", line.line[1..].escape_debug());
+                let _ = writeln!(
+                    output,
+                    "#warning {}",
+                    json5::to_string(&&line.line[1..]).unwrap(),
+                );
                 continue;
             }
             PchtxtLineData::BigEndian
@@ -163,7 +167,7 @@ pub fn pchtxt_to_nxpch(pchtxt: &str) -> (String, Vec<PchtxtDianostic>) {
                     let _ = write!(output, "0x{offset:08X} = ");
                     let string_part = &patch[..patch.len() - 1];
                     if let Ok(str) = str::from_utf8(string_part) {
-                        let _ = write!(output, "\"{}\"", str.escape_debug());
+                        output.push_str(&json5::to_string(&str).unwrap());
                     } else {
                         output.push('"');
                         for byte in string_part {
