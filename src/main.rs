@@ -69,7 +69,7 @@ enum PchtxtCommands {
 }
 
 fn main() -> miette::Result<()> {
-    let args = RootArgs::parse_from(["nxpch.exe", "build", "sample.nxpch"]);
+    let args = RootArgs::parse();
     match args.command {
         Commands::Build { source } => {
             let (filename, source, pre_parsed_statements) = parse_source_code(source, |src| {
