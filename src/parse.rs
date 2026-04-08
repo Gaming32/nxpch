@@ -90,7 +90,7 @@ pub enum ParsedCode {
     Float(OrderedFloat<f32>),
     Double(OrderedFloat<f64>),
     String(String),
-    Asm(String),
+    Asm(String, u64, SourceSpan),
 }
 
 #[derive(Clone)]
@@ -184,7 +184,10 @@ where
     ) -> bool {
         let Some(statement) = self.statements.next() else {
             self.preprocessor.end(diag(&mut record_diagnostic));
-            if self.target_build.is_none() && !self.code_output.is_empty() {
+            // TODO: Make early exits also trigger this check
+            if self.target_build.is_none()
+                && (!self.code_output.is_empty() || !self.code_labels.is_empty())
+            {
                 record_diagnostic(ParseDiagnostic::MissingBuildId);
             }
             return false;
@@ -500,8 +503,16 @@ where
             self.code_output.push((offset, parsed_value));
             return offset + value_width;
         }
-        self.code_output
-            .push((offset, ParsedCode::Asm(code.to_string())));
+        self.code_output.push((
+            offset,
+            ParsedCode::Asm(
+                code.to_string(),
+                (offset as u64)
+                    .checked_sub_signed(self.pointer_offset as i64)
+                    .unwrap(),
+                (source_offset, code.len()).into(),
+            ),
+        ));
         offset + 4
     }
 }

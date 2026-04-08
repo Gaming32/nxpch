@@ -203,12 +203,19 @@ pub fn generate_pchtxt(
     Ok(())
 }
 
+const IPS_UNSAFE_OFFSET: u32 = 0x45454F46;
+const IPS_MAX_HUNK_SIZE: u32 = 0xFFFF;
+
+pub fn can_generate_ips(vec: &PatchVec) -> Result<(), IpsGenerateError> {
+    if vec.has_hunk_starting_at(IPS_UNSAFE_OFFSET) {
+        return Err(IpsGenerateError::HasEofHunk);
+    }
+    Ok(())
+}
+
 /// Returns whether the patch was written. If the patch contains a hunk starting at address
 /// `0x45454F46`, it cannot be written.
 pub fn generate_ips(vec: &PatchVec, mut output: impl Write) -> Result<(), IpsGenerateError> {
-    const UNSAFE_OFFSET: u32 = 0x45454F46;
-    const MAX_HUNK_SIZE: u32 = 0xFFFF;
-
     #[inline]
     fn encode_hunk_offset(offset: u32, output: &mut impl Write) -> io::Result<()> {
         output.write_all(&offset.to_be_bytes())
@@ -217,7 +224,7 @@ pub fn generate_ips(vec: &PatchVec, mut output: impl Write) -> Result<(), IpsGen
     #[inline]
     fn encode_hunk_len(offset: u32, len: usize, output: &mut impl Write) -> io::Result<()> {
         assert!(
-            0 < len && len <= MAX_HUNK_SIZE as usize,
+            0 < len && len <= IPS_MAX_HUNK_SIZE as usize,
             "hunk at {offset} is {len}"
         );
         output.write_all(&(len as u16).to_be_bytes())
@@ -243,23 +250,23 @@ pub fn generate_ips(vec: &PatchVec, mut output: impl Write) -> Result<(), IpsGen
         Ok(())
     }
 
-    if vec.has_hunk_starting_at(UNSAFE_OFFSET) {
+    if vec.has_hunk_starting_at(IPS_UNSAFE_OFFSET) {
         return Err(IpsGenerateError::HasEofHunk);
     }
 
     output.write_all(b"IPS32")?;
-    let has_edit_at_unsafe_offset = vec.has_edit_at(UNSAFE_OFFSET);
+    let has_edit_at_unsafe_offset = vec.has_edit_at(IPS_UNSAFE_OFFSET);
     let mut safety_byte = None;
-    for (mut addr, mut hunk) in vec.iter_hunks(MAX_HUNK_SIZE) {
+    for (mut addr, mut hunk) in vec.iter_hunks(IPS_MAX_HUNK_SIZE) {
         let extra_byte = if has_edit_at_unsafe_offset {
-            if addr + hunk.len() as u32 == UNSAFE_OFFSET {
+            if addr + hunk.len() as u32 == IPS_UNSAFE_OFFSET {
                 assert!(safety_byte.is_none());
-                assert_eq!(hunk.len(), MAX_HUNK_SIZE as usize);
-                safety_byte = Some(hunk.remove(MAX_HUNK_SIZE as usize - 1));
+                assert_eq!(hunk.len(), IPS_MAX_HUNK_SIZE as usize);
+                safety_byte = Some(hunk.remove(IPS_MAX_HUNK_SIZE as usize - 1));
                 None
-            } else if addr == UNSAFE_OFFSET {
-                let extra_byte = (hunk.len() == MAX_HUNK_SIZE as usize)
-                    .then(|| hunk.remove(MAX_HUNK_SIZE as usize - 1));
+            } else if addr == IPS_UNSAFE_OFFSET {
+                let extra_byte = (hunk.len() == IPS_MAX_HUNK_SIZE as usize)
+                    .then(|| hunk.remove(IPS_MAX_HUNK_SIZE as usize - 1));
                 hunk.insert(
                     0,
                     safety_byte
