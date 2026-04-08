@@ -184,7 +184,6 @@ where
     ) -> bool {
         let Some(statement) = self.statements.next() else {
             self.preprocessor.end(diag(&mut record_diagnostic));
-            // TODO: Make early exits also trigger this check
             if self.target_build.is_none()
                 && (!self.code_output.is_empty() || !self.code_labels.is_empty())
             {
@@ -209,7 +208,7 @@ where
                             if let Some(forced) = self.forced.build_id
                                 && option.0 != forced
                             {
-                                return false;
+                                return self.early_exit();
                             }
                             self.target_build = Some((option.0, name_span));
                         }
@@ -331,6 +330,11 @@ where
         true
     }
 
+    fn early_exit(&mut self) -> bool {
+        self.target_build = None;
+        false
+    }
+
     fn make_forks<T>(
         &mut self,
         new_states: &mut Vec<ParseSubState<'forced, I>>,
@@ -339,7 +343,7 @@ where
     ) -> bool {
         let mut values = values.into_iter();
         let Some(first) = values.next() else {
-            return false;
+            return self.early_exit();
         };
         for value in values {
             let mut new_this = self.clone();
@@ -371,12 +375,12 @@ where
                     &mut define_fork,
                 ) {
                     new_states.truncate(first_state_idx);
-                    return false;
+                    return self.early_exit();
                 }
             }
             if !self.make_forks(&mut additional_new_states, sub_values, &mut define_fork) {
                 new_states.truncate(first_state_idx);
-                return false;
+                return self.early_exit();
             }
             new_states.append(&mut additional_new_states);
         }
