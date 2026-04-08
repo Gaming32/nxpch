@@ -148,6 +148,13 @@ impl MacroDefine {
         (result, offsets)
     }
 
+    #[allow(
+        clippy::type_complexity,
+        reason = "This return type is only used internally, and it's pretty easy to reason about. \
+                  Its parameters are: the found macro, the range at which the macro invocation was \
+                  found, and the list of arguments passed to the macro (Some with an empty Vec \
+                  means there were parentheses but no arguments)."
+    )]
     fn find_first_macro_use<'a, 'b>(
         s: &'b str,
         skip_index: usize,
