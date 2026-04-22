@@ -1,20 +1,24 @@
 use crate::assemble::Assembler;
-use crate::output::{can_generate_ips, generate_ips, generate_pchtxt};
+use crate::option::OutputFormat;
+use crate::output::{check_generate_ips, generate_ips, generate_pchtxt};
 use crate::parse::{BuildTarget, ForcedBuildOption, parse_statements};
 use crate::pchtxt::{pchtxt_to_nxpch, pchtxt_to_patches};
 use crate::pre_parse::PreParsedCode;
 use crate::preprocessor::MacroDefine;
-use clap::builder::Styles;
+use crate::zip_gen::{PathSegment, generate_zip, generate_zip_filename};
 use clap::{Parser, Subcommand};
 use clap_stdin::{FileOrStdin, FileOrStdout};
 use hashlink::LinkedHashSet;
-use miette::{Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity};
+use miette::{
+    Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity, miette,
+};
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufWriter, Write, stdout};
+use std::iter;
 use std::path::Path;
 use std::sync::Arc;
-use std::{iter, process};
+use tempfile::NamedTempFile;
 
 mod assemble;
 mod option;
@@ -24,6 +28,7 @@ mod pchtxt;
 mod pre_parse;
 mod preprocessor;
 mod utils;
+mod zip_gen;
 
 #[derive(Parser)]
 struct RootArgs {
@@ -93,6 +98,7 @@ enum PchtxtCommands {
 }
 
 fn main() -> miette::Result<()> {
+    miette::set_panic_hook();
     let args = RootArgs::parse();
     match args.command {
         Commands::Build {
@@ -123,14 +129,13 @@ fn main() -> miette::Result<()> {
                     parse_diags.get_or_insert(diag);
                 },
             );
-            check_error_count(print_diags(parse_diags, &filename, &source));
+            check_error_count(print_diags(parse_diags, &filename, &source))?;
 
             let (mut emulator, mut hardware): (Vec<_>, _) = generated_results
                 .into_iter()
                 .partition(|x| x.build_target == BuildTarget::Emulator);
-            let compiler = Assembler::new();
             if let Some(single_path) = single {
-                fn generate_count_error(count: usize) -> ! {
+                fn generate_count_error(count: usize) -> miette::Result<()> {
                     print_error_and_exit(
                         format_args!(
                             "--single was used, but {count} outputs were generated (expected 1).",
@@ -138,29 +143,29 @@ fn main() -> miette::Result<()> {
                         Some(
                             "Consider using --target, --build, and --setting to reduce output count.",
                         ),
-                    );
+                    )
                 }
                 match (emulator.len(), hardware.len()) {
                     (1, 1) => {
                         hardware[0].build_target = BuildTarget::Emulator;
                         if hardware[0] != emulator[0] {
-                            generate_count_error(2);
+                            generate_count_error(2)?;
                         }
                     }
                     (1, 0) => {}
                     (0, 1) => emulator = hardware,
-                    _ => generate_count_error(emulator.len() + hardware.len()),
+                    _ => generate_count_error(emulator.len() + hardware.len())?,
                 }
 
                 let to_build = emulator.into_iter().next().unwrap();
                 let mut compile_diags = vec![];
-                let built = compiler.assemble(to_build.code, to_build.labels, |diag| {
+                let built = Assembler::new().assemble(to_build.code, to_build.labels, |diag| {
                     compile_diags.push(diag);
                 });
-                check_error_count(print_diags(compile_diags, &filename, &source));
+                check_error_count(print_diags(compile_diags, &filename, &source))?;
 
                 let write_to_path_prefix = |prefix| -> miette::Result<_> {
-                    if can_generate_ips(&built).is_ok() {
+                    if check_generate_ips(&built).is_ok() {
                         let path = format!("{prefix}.ips");
                         generate_ips(&built, open_file(&path)?)
                             .with_context(|| format!("{WRITING_FILE}{path}"))?;
@@ -192,7 +197,7 @@ fn main() -> miette::Result<()> {
                                     "Unknown file extension for --single writing .{ext}. Please use .ips or .pchtxt.",
                                 ),
                                 None,
-                            ),
+                            )?,
                             None => write_to_path_prefix(path)?,
                         }
                     } else {
@@ -212,7 +217,92 @@ fn main() -> miette::Result<()> {
                         .with_context(|| format!("{WRITING_FILE}{STDOUT}"))?;
                 }
             } else {
-                todo!("Zip build not implemented");
+                let mut diags = vec![];
+                let mut record_diagnostic = |diag| diags.push(diag);
+                let emulator_temp = if !emulator.is_empty() {
+                    println!("Generating emulator zip");
+                    let mut temp = NamedTempFile::new()
+                        .into_diagnostic()
+                        .with_context(|| "Creating emulator zip tempfile")?;
+                    let filename = generate_zip_filename(&emulator, "emulator")
+                        .map_err(&mut record_diagnostic)
+                        .ok();
+                    generate_zip(
+                        emulator,
+                        temp.as_file_mut(),
+                        &[PathSegment::ModName, PathSegment::Static("exefs")],
+                        PathSegment::BuildId,
+                        false,
+                        &mut record_diagnostic,
+                    )
+                    .into_diagnostic()
+                    .with_context(|| "Generating emulator zip")?;
+                    filename.map(|name| (temp, name))
+                } else {
+                    None
+                };
+                let hardware_temp = if !hardware.is_empty() {
+                    println!("Generating hardware zip");
+                    let mut temp = NamedTempFile::new()
+                        .into_diagnostic()
+                        .with_context(|| "Creating hardware zip tempfile")?;
+                    let filename = generate_zip_filename(&hardware, "hardware")
+                        .map_err(&mut record_diagnostic)
+                        .ok();
+                    let path_segments = if hardware
+                        .iter()
+                        .all(|r| r.forced_output_format == Some(OutputFormat::Pchtxt))
+                    {
+                        &[
+                            PathSegment::Static("switch"),
+                            PathSegment::Static("ipswitch"),
+                            PathSegment::ModName,
+                        ] as &[_]
+                    } else {
+                        &[
+                            PathSegment::Static("atmosphere"),
+                            PathSegment::Static("exefs_patches"),
+                            PathSegment::ModName,
+                        ]
+                    };
+                    generate_zip(
+                        hardware,
+                        temp.as_file_mut(),
+                        path_segments,
+                        PathSegment::BuildId,
+                        true,
+                        &mut record_diagnostic,
+                    )
+                    .into_diagnostic()
+                    .with_context(|| "Generating hardware zip")?;
+                    filename.map(|name| (temp, name))
+                } else {
+                    None
+                };
+                check_error_count(print_diags(diags, &filename, &source))?;
+
+                let output_dir = if filename == STDIN {
+                    Path::new("")
+                } else {
+                    let file_path = Path::new(filename.as_str());
+                    if let Some(parent) = file_path.parent() {
+                        parent
+                    } else {
+                        Path::new("")
+                    }
+                };
+                let generate_output = |temp: Option<(NamedTempFile, _)>| -> miette::Result<()> {
+                    if let Some((temp, filename)) = temp {
+                        let out_path = output_dir.join(filename);
+                        temp.persist(&out_path)
+                            .into_diagnostic()
+                            .with_context(|| format!("{WRITING_FILE}{}", out_path.display()))?;
+                        println!("Wrote {}", out_path.display());
+                    }
+                    Ok(())
+                };
+                generate_output(emulator_temp)?;
+                generate_output(hardware_temp)?;
             }
         }
         Commands::Import(ImportCommands::Pchtxt { source, output }) => {
@@ -242,10 +332,10 @@ fn main() -> miette::Result<()> {
     Ok(())
 }
 
-const STDIN: &str = "<stdin>";
-const STDOUT: &str = "<stdout>";
-const READING_FILE: &str = "Reading file ";
-const WRITING_FILE: &str = "Writing file ";
+pub const STDIN: &str = "<stdin>";
+pub const STDOUT: &str = "<stdout>";
+pub const READING_FILE: &str = "Reading file ";
+pub const WRITING_FILE: &str = "Writing file ";
 
 fn parse_source_code<T, D>(
     source: FileOrStdin,
@@ -265,7 +355,7 @@ where
         .into_diagnostic()
         .with_context(|| format!("{READING_FILE}{filename}"))?;
     let (parsed, diags) = parser(&raw_source);
-    check_error_count(print_diags(diags, &filename, &raw_source));
+    check_error_count(print_diags(diags, &filename, &raw_source))?;
     Ok((filename, raw_source, parsed))
 }
 
@@ -318,20 +408,18 @@ fn print_diags(
     error_count
 }
 
-fn check_error_count(error_count: usize) {
+fn check_error_count(error_count: usize) -> miette::Result<()> {
     if error_count > 0 {
-        eprintln!("Build failed due to {error_count} error(s)");
-        process::exit(error_count.try_into().unwrap_or(i32::MAX))
+        Err(miette!("Build failed due to {error_count} error(s)"))
+    } else {
+        Ok(())
     }
 }
 
-fn print_error_and_exit(error: impl Display, tip: Option<&str>) -> ! {
-    let styles = Styles::styled();
-    let error_style = styles.get_error();
-    let valid_style = styles.get_valid();
-    eprintln!("{error_style}error:{error_style:#} {error}");
-    if let Some(tip) = tip {
-        eprintln!("  {valid_style}tip:{valid_style:#} {tip}");
+fn print_error_and_exit(error: impl Display, tip: Option<&str>) -> miette::Result<()> {
+    if let Some(help) = tip {
+        Err(miette!(help = help, "{error}"))
+    } else {
+        Err(miette!("{error}"))
     }
-    process::exit(1);
 }

@@ -250,7 +250,7 @@ where
                             }
                         });
                     }
-                    NxpchOption::OutputFormat(option) => match self.target_build {
+                    NxpchOption::OutputFormat(option) => match self.forced_output_format {
                         Some((_, original_span)) => {
                             record_diagnostic(ParseDiagnostic::DuplicateOutputFormat {
                                 at: name_span,

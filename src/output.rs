@@ -206,7 +206,7 @@ pub fn generate_pchtxt(
 const IPS_UNSAFE_OFFSET: u32 = 0x45454F46;
 const IPS_MAX_HUNK_SIZE: u32 = 0xFFFF;
 
-pub fn can_generate_ips(vec: &PatchVec) -> Result<(), IpsGenerateError> {
+pub fn check_generate_ips(vec: &PatchVec) -> Result<(), IpsGenerateError> {
     if vec.has_hunk_starting_at(IPS_UNSAFE_OFFSET) {
         return Err(IpsGenerateError::HasEofHunk);
     }
@@ -355,6 +355,15 @@ pub enum IpsGenerateError {
     #[error(transparent)]
     #[diagnostic(code(ips::io))]
     Io(#[from] io::Error),
+}
+
+impl IpsGenerateError {
+    pub fn unwrap_io_err(self) -> io::Error {
+        match self {
+            Self::Io(err) => err,
+            err => panic!("IpsGenerateError::unwrap_io_err called with non-I/O error: {err}"),
+        }
+    }
 }
 
 #[cfg(test)]
