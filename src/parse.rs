@@ -11,7 +11,7 @@ use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
 use std::num::{IntErrorKind, ParseIntError};
 use std::sync::Arc;
-use std::vec;
+use std::{mem, vec};
 use subslice_offset::SubsliceOffset;
 use thiserror::Error;
 
@@ -20,9 +20,9 @@ pub struct ParsingResult {
     pub build_target: BuildTarget,
     pub target_build: BuildId,
     pub forced_output_format: Option<OutputFormat>,
-    pub user_settings: Vec<Arc<str>>,
-    pub code: Vec<(u32, ParsedCode)>,
-    pub labels: Vec<(String, u32)>,
+    pub user_settings: Arc<Vec<Arc<str>>>,
+    pub code: Arc<Vec<(u32, ParsedCode)>>,
+    pub labels: Vec<(Arc<str>, u32)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -57,20 +57,20 @@ where
         for define in initial_defines {
             start_state
                 .preprocessor
-                .define(define, diag(&mut record_diagnostic));
+                .define(Arc::new(define), diag(&mut record_diagnostic));
         }
 
         let mut new_start_states = vec![];
         start_state.make_forks(&mut new_start_states, build_targets, |target, fork| {
             fork.build_target = target;
             fork.preprocessor.define(
-                MacroDefine::create_const(
+                Arc::new(MacroDefine::create_const(
                     match target {
                         BuildTarget::Emulator => "EMULATOR".into(),
                         BuildTarget::Hardware => "HARDWARE".into(),
                     },
                     "1".into(),
-                ),
+                )),
                 diag(&mut record_diagnostic),
             );
         });
@@ -89,8 +89,8 @@ pub enum ParsedCode {
     Long(u64),
     Float(OrderedFloat<f32>),
     Double(OrderedFloat<f64>),
-    String(String),
-    Asm(String, u64, SourceSpan),
+    String(Arc<str>),
+    Asm(Arc<str>, u64, SourceSpan),
 }
 
 #[derive(Clone)]
@@ -127,8 +127,8 @@ where
                         code: state.code_output,
                         labels: state
                             .code_labels
-                            .into_iter()
-                            .map(|(name, (_, address))| (name, address))
+                            .iter()
+                            .map(|(name, &(_, address))| (name.clone(), address))
                             .collect(),
                     })
                 }),
@@ -147,13 +147,13 @@ struct ParseSubState<'forced, I> {
     build_target: BuildTarget,
     target_build: Option<(BuildId, SourceSpan)>,
     pointer_offset: i32,
-    user_settings: Vec<Arc<str>>,
+    user_settings: Arc<Vec<Arc<str>>>,
     forced_output_format: Option<(OutputFormat, SourceSpan)>,
 
-    code_output: Vec<(u32, ParsedCode)>,
+    code_output: Arc<Vec<(u32, ParsedCode)>>,
     code_multi: Option<u32>,
     code_multi_ended: Option<SourceOffset>,
-    code_labels: HashMap<String, (SourceSpan, u32)>,
+    code_labels: Arc<HashMap<Arc<str>, (SourceSpan, u32)>>,
 }
 
 impl<'forced, I> ParseSubState<'forced, I>
@@ -164,16 +164,16 @@ where
         Self {
             statements,
             forced: filters,
-            preprocessor: PreprocessorState::new(),
+            preprocessor: PreprocessorState::default(),
             build_target: BuildTarget::Emulator,
             target_build: None,
             pointer_offset: 0,
-            user_settings: vec![],
+            user_settings: Arc::new(vec![]),
             forced_output_format: None,
-            code_output: vec![],
+            code_output: Arc::new(vec![]),
             code_multi: None,
             code_multi_ended: None,
-            code_labels: HashMap::new(),
+            code_labels: Arc::new(HashMap::new()),
         }
     }
 
@@ -183,7 +183,7 @@ where
         mut record_diagnostic: impl FnMut(ParseDiagnostic),
     ) -> bool {
         let Some(statement) = self.statements.next() else {
-            self.preprocessor.end(diag(&mut record_diagnostic));
+            mem::take(&mut self.preprocessor).end(diag(&mut record_diagnostic));
             if self.target_build.is_none()
                 && (!self.code_output.is_empty() || !self.code_labels.is_empty())
             {
@@ -243,7 +243,7 @@ where
                             }
                         }
                         return self.make_deep_forks(new_states, option.0, |setting, fork| {
-                            fork.user_settings.push(setting.name);
+                            Arc::make_mut(&mut fork.user_settings).push(setting.name);
                             for define in setting.defines {
                                 fork.preprocessor
                                     .define(define, diag(&mut record_diagnostic));
@@ -402,7 +402,7 @@ where
         if let Some(label_name) = code.strip_suffix(':') {
             let span = (source_offset, label_name.len()).into();
             if MacroDefine::NAME_REGEX.test(label_name) {
-                match self.code_labels.entry(label_name.to_string()) {
+                match Arc::make_mut(&mut self.code_labels).entry(label_name.into()) {
                     Entry::Occupied(entry) => {
                         record_diagnostic(ParseDiagnostic::DuplicateLabels {
                             at: span,
@@ -491,7 +491,7 @@ where
                         }
                     };
                     let length = parsed.len();
-                    (ParsedCode::String(parsed), length as u32)
+                    (ParsedCode::String(parsed.into()), length as u32)
                 }
                 _ => {
                     record_diagnostic(ParseDiagnostic::UnknownDataDirective {
@@ -504,13 +504,13 @@ where
                     return offset;
                 }
             };
-            self.code_output.push((offset, parsed_value));
+            Arc::make_mut(&mut self.code_output).push((offset, parsed_value));
             return offset + value_width;
         }
-        self.code_output.push((
+        Arc::make_mut(&mut self.code_output).push((
             offset,
             ParsedCode::Asm(
-                code.to_string(),
+                code.into(),
                 (offset as u64)
                     .checked_sub_signed(self.pointer_offset as i64)
                     .unwrap(),

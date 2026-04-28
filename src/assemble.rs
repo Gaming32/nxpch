@@ -2,6 +2,7 @@ use crate::output::PatchVec;
 use crate::parse::ParsedCode;
 use keystone::{Arch, Keystone, Mode, error_msg};
 use miette::{Diagnostic, SourceSpan};
+use std::sync::Arc;
 use thiserror::Error;
 
 pub struct Assembler {
@@ -17,8 +18,8 @@ impl Assembler {
 
     pub fn assemble(
         &self,
-        code: Vec<(u32, ParsedCode)>,
-        labels: Vec<(String, u32)>,
+        code: impl IntoIterator<Item = (u32, ParsedCode)>,
+        labels: impl IntoIterator<Item = (Arc<str>, u32)>,
         mut record_diagnostic: impl FnMut(AssembleDiagnostic),
     ) -> PatchVec {
         let mut generated_asm: String = labels
@@ -37,7 +38,7 @@ impl Assembler {
                 ParsedCode::Long(long) => result.put(address, long.to_le_bytes()),
                 ParsedCode::Float(float) => result.put(address, float.to_le_bytes()),
                 ParsedCode::Double(double) => result.put(address, double.to_le_bytes()),
-                ParsedCode::String(string) => result.put(address, string.into_bytes()),
+                ParsedCode::String(string) => result.put(address, string.bytes()),
                 ParsedCode::Asm(asm, code_address, source_span) => {
                     generated_asm.push_str(&asm);
                     asm_lines.push((asm, source_span));

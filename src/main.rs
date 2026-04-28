@@ -8,7 +8,7 @@ use crate::preprocessor::MacroDefine;
 use crate::zip_gen::{PathSegment, generate_zip, generate_zip_filename};
 use clap::{Parser, Subcommand};
 use clap_stdin::{FileOrStdin, FileOrStdout};
-use hashlink::LinkedHashSet;
+use indexmap::IndexSet;
 use miette::{
     Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity, miette,
 };
@@ -113,7 +113,7 @@ fn main() -> miette::Result<()> {
                 (parsed.statements, parsed.diagnostics)
             })?;
 
-            let mut parse_diags = LinkedHashSet::new();
+            let mut parse_diags = IndexSet::new();
             let generated_results = parse_statements(
                 pre_parsed_statements.into_iter().map(|(_, s)| s),
                 define,
@@ -126,7 +126,7 @@ fn main() -> miette::Result<()> {
                     options: setting,
                 },
                 |diag| {
-                    parse_diags.get_or_insert(diag);
+                    parse_diags.insert(diag);
                 },
             );
             check_error_count(print_diags(parse_diags, &filename, &source))?;
@@ -151,6 +151,7 @@ fn main() -> miette::Result<()> {
                         if hardware[0] != emulator[0] {
                             generate_count_error(2)?;
                         }
+                        drop(hardware);
                     }
                     (1, 0) => {}
                     (0, 1) => emulator = hardware,
@@ -159,9 +160,13 @@ fn main() -> miette::Result<()> {
 
                 let to_build = emulator.into_iter().next().unwrap();
                 let mut compile_diags = vec![];
-                let built = Assembler::new().assemble(to_build.code, to_build.labels, |diag| {
-                    compile_diags.push(diag);
-                });
+                let built = Assembler::new().assemble(
+                    Arc::try_unwrap(to_build.code).unwrap(),
+                    to_build.labels,
+                    |diag| {
+                        compile_diags.push(diag);
+                    },
+                );
                 check_error_count(print_diags(compile_diags, &filename, &source))?;
 
                 let write_to_path_prefix = |prefix| -> miette::Result<_> {

@@ -31,7 +31,7 @@ pub fn generate_zip(
     let mut built_path = String::new();
     for patch in patches {
         built_path.clear();
-        for option in &patch.user_settings {
+        for option in patch.user_settings.iter() {
             built_path.push_str(option);
             built_path.push('/');
             if !made_directories.contains(&built_path) {
@@ -49,7 +49,7 @@ pub fn generate_zip(
         }
         file_name.format(&patch, &mut built_path);
 
-        let compiled = assembler.assemble(patch.code, patch.labels, |diag| {
+        let compiled = assembler.assemble(patch.code.iter().cloned(), patch.labels, |diag| {
             record_diagnostic(diag.into());
         });
         let forces_pchtxt = patch.forced_output_format == Some(OutputFormat::Pchtxt);
@@ -60,13 +60,13 @@ pub fn generate_zip(
         if force_ips_default && !all_force_pchtxt {
             if let Some(err) = ips_generate_error {
                 record_diagnostic(ZipGenerateDiagnostic::PchtxtRequired {
-                    settings: patch.user_settings,
+                    settings: Arc::unwrap_or_clone(patch.user_settings),
                     cause: err,
                 });
                 continue;
             } else if forces_pchtxt {
                 record_diagnostic(ZipGenerateDiagnostic::PchtxtPartiallyRequested {
-                    settings: patch.user_settings,
+                    settings: Arc::unwrap_or_clone(patch.user_settings),
                 });
                 continue;
             }
@@ -76,7 +76,7 @@ pub fn generate_zip(
             Some(OutputFormat::Ips) => {
                 if let Some(err) = ips_generate_error {
                     record_diagnostic(ZipGenerateDiagnostic::IpsError {
-                        settings: patch.user_settings,
+                        settings: Arc::unwrap_or_clone(patch.user_settings),
                         cause: err,
                     });
                     continue;

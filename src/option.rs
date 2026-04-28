@@ -73,6 +73,7 @@ impl NxpchOption {
                                 + SourceOffset::from_location(json, location.line, location.column)
                                     .offset()
                                 + 1;
+                            let define = Arc::make_mut(define);
                             define.declaration_range = (
                                 define.declaration_range.offset() + offset,
                                 define.declaration_range.len(),
@@ -118,6 +119,7 @@ impl NxpchOption {
                                     )
                                     .offset()
                                     + 1;
+                                let define = Arc::make_mut(define);
                                 define.declaration_range = (
                                     define.declaration_range.offset() + offset,
                                     define.declaration_range.len(),
@@ -154,7 +156,7 @@ pub struct TargetBuildsOption(pub Vec<TargetBuildMatrixEntry>);
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TargetBuildMatrixEntry {
     pub id: BuildId,
-    pub defines: Vec<MacroDefine>,
+    pub defines: Vec<Arc<MacroDefine>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -167,7 +169,7 @@ pub struct UserSettingsOption(pub Vec<Vec<UserSetting>>);
 pub struct UserSetting {
     pub name: Arc<str>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub defines: Vec<MacroDefine>,
+    pub defines: Vec<Arc<MacroDefine>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

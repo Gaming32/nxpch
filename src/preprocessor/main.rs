@@ -4,6 +4,7 @@ use crate::utils::{Combine, json5_error_to_offset};
 use miette::{Diagnostic, SourceOffset, SourceSpan};
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::sync::Arc;
 use subslice_offset::SubsliceOffset;
 use thiserror::Error;
 
@@ -16,18 +17,18 @@ pub struct PreprocessorDirective {
 
 #[derive(Clone, Debug)]
 pub enum PreprocessorDirectiveInstruction {
-    If(String),
-    ElseIf(String),
+    If(Arc<str>),
+    ElseIf(Arc<str>),
     Else,
     EndIf,
-    IfDefined(String),
-    IfNotDefined(String),
-    ElseIfDefined(String),
-    ElseIfNotDefined(String),
-    Define(MacroDefine),
-    Undefine(String),
-    Error(String),
-    Warning(String),
+    IfDefined(Arc<str>),
+    IfNotDefined(Arc<str>),
+    ElseIfDefined(Arc<str>),
+    ElseIfNotDefined(Arc<str>),
+    Define(Arc<MacroDefine>),
+    Undefine(Arc<str>),
+    Error(Arc<str>),
+    Warning(Arc<str>),
 }
 
 impl PreprocessorDirective {
@@ -54,7 +55,7 @@ impl PreprocessorDirective {
         macro_rules! require_body {
             ($variant:ident, $what:literal) => {{
                 if !body.is_empty() {
-                    construct_result!(PDI::$variant(body.to_string()))
+                    construct_result!(PDI::$variant(body.into()))
                 } else {
                     record_diagnostic(PreprocessorDiagnostic::MissingArgument {
                         keyword: $what,
@@ -80,7 +81,7 @@ impl PreprocessorDirective {
         macro_rules! require_var_name {
             ($variant:ident, $what:literal) => {{
                 if MacroDefine::NAME_REGEX.test(body) {
-                    construct_result!(PDI::$variant(body.to_string()))
+                    construct_result!(PDI::$variant(body.into()))
                 } else {
                     record_diagnostic(PreprocessorDiagnostic::InvalidVarName {
                         keyword: $what,
@@ -92,7 +93,7 @@ impl PreprocessorDirective {
         }
         macro_rules! require_string {
             ($variant:ident, $what:literal) => {
-                match json5::from_str::<String>(body) {
+                match json5::from_str::<Arc<str>>(body) {
                     Ok(s) => construct_result!(PDI::$variant(s)),
                     Err(err) => {
                         record_diagnostic(PreprocessorDiagnostic::InvalidString {
@@ -115,11 +116,11 @@ impl PreprocessorDirective {
             "#ifndef" => require_var_name!(IfNotDefined, "ifndef"),
             "#elifdef" => require_var_name!(ElseIfDefined, "elifdef"),
             "#elifndef" => require_var_name!(ElseIfNotDefined, "elifndef"),
-            "#define" => construct_result!(PDI::Define(MacroDefine::parse(
+            "#define" => construct_result!(PDI::Define(Arc::new(MacroDefine::parse(
                 body,
                 body_base_offset,
                 |diag| record_diagnostic(diag.into()),
-            )?)),
+            )?))),
             "#undef" => require_var_name!(Undefine, "undef"),
             "#error" => require_string!(Error, "error"),
             "#warning" => require_string!(Warning, "warning"),
@@ -153,22 +154,15 @@ impl PreprocessorDirectiveInstruction {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct PreprocessorState {
-    defines: HashMap<Cow<'static, str>, MacroDefine>,
-    activity: Vec<ActivityState>,
+    defines: Arc<HashMap<Arc<str>, Arc<MacroDefine>>>,
+    activity: Arc<Vec<ActivityState>>,
 }
 
 impl PreprocessorState {
-    pub fn new() -> Self {
-        Self {
-            defines: HashMap::new(),
-            activity: vec![ActivityState::Root],
-        }
-    }
-
     pub fn active(&self) -> bool {
-        self.activity.last().unwrap().active()
+        self.state().active()
     }
 
     pub fn preprocess_line<'a>(
@@ -180,7 +174,7 @@ impl PreprocessorState {
         MacroDefine::expand_all_in(
             s,
             offset,
-            |name| self.defines.get(name),
+            |name| self.defines.get(name).map(|v| &**v),
             |diag| record_diagnostic(diag.into()),
         )
     }
@@ -211,11 +205,11 @@ impl PreprocessorState {
             | PDI::IfNotDefined(condition)
             | PDI::ElseIfDefined(condition)
             | PDI::ElseIfNotDefined(condition) => {
-                let macro_defined = |name: &str| self.defines.contains_key(&Cow::Borrowed(name));
-                let resolve = || {
+                let macro_defined = |name: &str| self.defines.contains_key(name);
+                let mut resolve = || {
                     if is_if_elif {
                         let (expanded, expanded_offsets) = self.preprocess_line(
-                            Cow::Owned(condition),
+                            Cow::Borrowed(&condition),
                             directive.body_span.offset(),
                             &mut record_diagnostic,
                         );
@@ -234,54 +228,51 @@ impl PreprocessorState {
                 };
                 if is_if_ifdef_ifndef {
                     if !self.active() {
-                        self.activity
-                            .push(ActivityState::InactivePendingEndif(new_block));
+                        self.push_state(ActivityState::InactivePendingEndif(new_block));
                     } else if resolve() {
-                        self.activity.push(ActivityState::ResolvedTrue(new_block));
+                        self.push_state(ActivityState::ResolvedTrue(new_block));
                     } else {
-                        self.activity.push(ActivityState::ResolvedFalse(new_block));
+                        self.push_state(ActivityState::ResolvedFalse(new_block));
                     }
                 } else {
-                    let new_activity = match self.activity.last().unwrap() {
+                    match self.state() {
                         ActivityState::Root => {
                             record_diagnostic(PreprocessorDiagnostic::MissingIf {
                                 keyword: new_block.keyword,
                                 at: directive.keyword_span,
-                            });
-                            ActivityState::Root
+                            })
                         }
                         ActivityState::ResolvedTrue(_) => {
-                            ActivityState::InactivePendingEndif(new_block)
+                            self.replace_state(ActivityState::InactivePendingEndif(new_block))
                         }
-                        ActivityState::ResolvedFalse(_) => {
-                            if resolve() {
-                                ActivityState::ResolvedTrue(new_block)
-                            } else {
-                                ActivityState::ResolvedFalse(new_block)
-                            }
-                        }
+                        ActivityState::ResolvedFalse(_) => self.replace_state(if resolve() {
+                            ActivityState::ResolvedTrue(new_block)
+                        } else {
+                            ActivityState::ResolvedFalse(new_block)
+                        }),
                         ActivityState::InactivePendingEndif(_) => {
-                            ActivityState::InactivePendingEndif(new_block)
+                            self.replace_state(ActivityState::InactivePendingEndif(new_block))
                         }
                     };
-                    *self.activity.last_mut().unwrap() = new_activity;
                 }
             }
-            PDI::Else => match self.activity.last_mut().unwrap() {
+            PDI::Else => match self.state() {
                 ActivityState::Root => record_diagnostic(PreprocessorDiagnostic::MissingIf {
                     keyword: "else",
                     at: directive.keyword_span,
                 }),
-                x @ ActivityState::ResolvedTrue(_) => {
-                    *x = ActivityState::InactivePendingEndif(new_block)
+                ActivityState::ResolvedTrue(_) => {
+                    self.replace_state(ActivityState::InactivePendingEndif(new_block))
                 }
-                x @ ActivityState::ResolvedFalse(_) => *x = ActivityState::ResolvedTrue(new_block),
-                x @ ActivityState::InactivePendingEndif(_) => {
-                    *x = ActivityState::InactivePendingEndif(new_block)
+                ActivityState::ResolvedFalse(_) => {
+                    self.replace_state(ActivityState::ResolvedTrue(new_block))
+                }
+                ActivityState::InactivePendingEndif(_) => {
+                    self.replace_state(ActivityState::InactivePendingEndif(new_block))
                 }
             },
             PDI::EndIf => {
-                if self.try_pop().is_none() {
+                if self.pop_state().is_none() {
                     record_diagnostic(PreprocessorDiagnostic::MissingIf {
                         keyword: "endif",
                         at: directive.keyword_span,
@@ -290,23 +281,25 @@ impl PreprocessorState {
             }
             PDI::Define(define) => {
                 let new_define = define.declaration_range;
-                if let Some(old) = self.defines.insert(Cow::Owned(define.name.clone()), define) {
+                if let Some(old) =
+                    Arc::make_mut(&mut self.defines).insert(define.name.as_str().into(), define)
+                {
                     record_diagnostic(PreprocessorDiagnostic::DuplicateDefine {
-                        name: old.name,
+                        name: old.name.clone(),
                         at: directive.keyword_span.combine(new_define),
                         original: old.declaration_range,
                     });
                 }
             }
             PDI::Undefine(name) => {
-                self.defines.remove(&Cow::Owned(name));
+                Arc::make_mut(&mut self.defines).remove(&*name);
             }
             PDI::Warning(warning) => record_diagnostic(PreprocessorDiagnostic::UserWarning {
-                message: warning,
+                message: warning.to_string(),
                 at: directive.body_span,
             }),
             PDI::Error(error) => record_diagnostic(PreprocessorDiagnostic::UserError {
-                message: error,
+                message: error.to_string(),
                 at: directive.body_span,
             }),
         }
@@ -314,7 +307,7 @@ impl PreprocessorState {
 
     pub fn define(
         &mut self,
-        define: MacroDefine,
+        define: Arc<MacroDefine>,
         record_diagnostic: impl FnMut(PreprocessorDiagnostic),
     ) {
         self.exec(
@@ -329,8 +322,8 @@ impl PreprocessorState {
 
     /// Resets the preprocessor to a fresh state, emitting any preprocessor::unterminated errors on
     /// the way.
-    pub fn end(&mut self, mut record_diagnostic: impl FnMut(PreprocessorDiagnostic)) {
-        while let Some(unclosed) = self.try_pop() {
+    pub fn end(self, mut record_diagnostic: impl FnMut(PreprocessorDiagnostic)) {
+        for unclosed in self.activity.iter().rev() {
             let block = match unclosed {
                 ActivityState::Root => unreachable!(),
                 ActivityState::ResolvedTrue(block) => block,
@@ -340,13 +333,28 @@ impl PreprocessorState {
             record_diagnostic(PreprocessorDiagnostic::Unterminated {
                 keyword: block.keyword,
                 at: block.keyword_span,
-            })
+            });
         }
-        self.defines.clear();
     }
 
-    fn try_pop(&mut self) -> Option<ActivityState> {
-        self.activity.pop_if(|x| *x != ActivityState::Root)
+    fn state(&self) -> ActivityState {
+        self.activity.last().copied().unwrap_or_default()
+    }
+
+    fn push_state(&mut self, state: ActivityState) {
+        Arc::make_mut(&mut self.activity).push(state);
+    }
+
+    fn replace_state(&mut self, state: ActivityState) {
+        let activity = Arc::make_mut(&mut self.activity);
+        match activity.last_mut() {
+            Some(last) => *last = state,
+            None => activity.push(state),
+        }
+    }
+
+    fn pop_state(&mut self) -> Option<ActivityState> {
+        Arc::make_mut(&mut self.activity).pop()
     }
 }
 
@@ -444,8 +452,9 @@ pub enum PreprocessorDiagnostic {
     Expr(#[from] ExprDiagnostic),
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 enum ActivityState {
+    #[default]
     Root,
     ResolvedTrue(OpenBlock),
     ResolvedFalse(OpenBlock),
@@ -476,7 +485,7 @@ mod test {
         let mut diags = vec![];
         let mut record_diagnostic = |diag| diags.push(diag);
         let mut result = String::new();
-        let mut preprocessor = PreprocessorState::new();
+        let mut preprocessor = PreprocessorState::default();
         for line in code.lines() {
             let offset = code.subslice_offset(line).unwrap();
             if line.starts_with('#') {
