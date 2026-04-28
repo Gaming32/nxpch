@@ -15,7 +15,7 @@ pub struct PreParsedCode {
 
 #[derive(Clone, Debug)]
 pub enum PreParsedStatement {
-    Option(NxpchOption, SourceSpan),
+    Option(Arc<NxpchOption>, SourceSpan),
     Preprocessor(PreprocessorDirective),
     Code(Arc<str>, SourceSpan),
 }
@@ -48,7 +48,7 @@ impl PreParsedCode {
                             statement_start + full_match.len() + json_string.trim_end().len();
                         statements.push((
                             statement_start..statement_end,
-                            PreParsedStatement::Option(option, name_span),
+                            PreParsedStatement::Option(Arc::new(option), name_span),
                         ));
                     }
                     Err(OptionParseError::InvalidOption(err)) => {

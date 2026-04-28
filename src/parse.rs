@@ -196,7 +196,7 @@ where
                 if !self.preprocessor.active() {
                     return true;
                 }
-                match option {
+                match &*option {
                     NxpchOption::TargetBuild(option) => match self.target_build {
                         Some((_, original_span)) => {
                             record_diagnostic(ParseDiagnostic::DuplicateBuildId {
@@ -213,7 +213,7 @@ where
                             self.target_build = Some((option.0, name_span));
                         }
                     },
-                    NxpchOption::TargetBuilds(mut option) => {
+                    NxpchOption::TargetBuilds(option) => {
                         if let Some((_, original_span)) = self.target_build {
                             record_diagnostic(ParseDiagnostic::DuplicateBuildId {
                                 at: name_span,
@@ -221,32 +221,38 @@ where
                             });
                             return true;
                         }
-                        if let Some(forced) = self.forced.build_id {
-                            option.0.retain(|entry| entry.id == forced);
-                        }
-                        return self.make_forks(new_states, option.0, |entry, fork| {
-                            fork.target_build = Some((entry.id, name_span));
-                            for define in entry.defines {
-                                fork.preprocessor
-                                    .define(define, diag(&mut record_diagnostic));
-                            }
-                        });
+                        let forced_bid = self.forced.build_id;
+                        return self.make_forks(
+                            new_states,
+                            option
+                                .0
+                                .iter()
+                                .filter(|opt| forced_bid.is_none_or(|forced| opt.id == forced)),
+                            |entry, fork| {
+                                fork.target_build = Some((entry.id, name_span));
+                                for define in &entry.defines {
+                                    fork.preprocessor
+                                        .define(define.clone(), diag(&mut record_diagnostic));
+                                }
+                            },
+                        );
                     }
                     NxpchOption::PointerOffset(option) => {
                         self.pointer_offset = option.0;
                         self.end_multi_code(name_span.offset());
                     }
-                    NxpchOption::UserSettings(mut option) => {
+                    NxpchOption::UserSettings(option) => {
+                        let mut option = Cow::Borrowed(&option.0);
                         if let Some(forced) = self.forced.options.get(self.user_settings.len()..) {
-                            for (forced_value, settings) in forced.iter().zip(&mut option.0) {
+                            for (forced_value, settings) in forced.iter().zip(option.to_mut()) {
                                 settings.retain(|setting| &*setting.name == forced_value);
                             }
                         }
-                        return self.make_deep_forks(new_states, option.0, |setting, fork| {
-                            Arc::make_mut(&mut fork.user_settings).push(setting.name);
-                            for define in setting.defines {
+                        return self.make_deep_forks(new_states, &*option, |setting, fork| {
+                            Arc::make_mut(&mut fork.user_settings).push(setting.name.clone());
+                            for define in &setting.defines {
                                 fork.preprocessor
-                                    .define(define, diag(&mut record_diagnostic));
+                                    .define(define.clone(), diag(&mut record_diagnostic));
                             }
                         });
                     }
