@@ -1,16 +1,19 @@
 use crate::option::{BuildId, NxpchOption, OutputFormat};
 use crate::pre_parse::PreParsedStatement;
 use crate::preprocessor::{MacroDefine, PreprocessorDiagnostic, PreprocessorState};
-use crate::utils::{AsNum, closest_key};
+use crate::utils::{AsNum, closest_key, order_diags_by_labels};
 use clap::ValueEnum;
+use itertools::Either;
 use miette::{Diagnostic, SourceOffset, SourceSpan};
 use num_traits::{Num, Signed, Unsigned};
 use ordered_float::OrderedFloat;
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{HashMap, LinkedList};
 use std::num::{IntErrorKind, ParseIntError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::{mem, vec};
 use subslice_offset::SubsliceOffset;
 use thiserror::Error;
@@ -42,11 +45,11 @@ pub fn parse_statements<I, Defines, Targets>(
     initial_defines: Defines,
     build_targets: Targets,
     forced: ForcedBuildOption,
-    mut record_diagnostic: impl FnMut(ParseDiagnostic),
-) -> BTreeSet<ParsingResult>
+    mut record_diagnostic: impl FnMut(ParseDiagnostic) + Send,
+) -> Vec<ParsingResult>
 where
     I: IntoIterator<Item = PreParsedStatement>,
-    I::IntoIter: Clone,
+    I::IntoIter: Clone + Send,
     Defines: IntoIterator<Item = MacroDefine>,
     Targets: IntoIterator<Item = BuildTarget>,
 {
@@ -96,44 +99,31 @@ pub enum ParsedCode {
 #[derive(Clone)]
 struct ParseState<'forced, I> {
     active_states: Vec<ParseSubState<'forced, I>>,
-    new_states: Vec<ParseSubState<'forced, I>>,
-    finished_results: BTreeSet<ParsingResult>,
+    finished_results: Vec<ParsingResult>,
 }
 
 impl<'forced, I> ParseState<'forced, I>
 where
-    I: Iterator<Item = PreParsedStatement> + Clone,
+    I: Iterator<Item = PreParsedStatement> + Clone + Send,
 {
     fn new(statements: I, filters: &'forced ForcedBuildOption) -> Self {
         Self {
             active_states: vec![ParseSubState::new(statements, filters)],
-            new_states: vec![],
-            finished_results: BTreeSet::new(),
+            finished_results: vec![],
         }
     }
 
-    fn step(&mut self, mut record_diagnostic: impl FnMut(ParseDiagnostic)) -> bool {
-        self.finished_results.extend(
-            self.active_states
-                .extract_if(.., |state| {
-                    !state.step(&mut self.new_states, &mut record_diagnostic)
-                })
-                .filter_map(|state| {
-                    Some(ParsingResult {
-                        build_target: state.build_target,
-                        target_build: state.target_build.map(|(bid, _)| bid)?,
-                        user_settings: state.user_settings,
-                        forced_output_format: state.forced_output_format.map(|(fmt, _)| fmt),
-                        code: state.code_output,
-                        labels: state
-                            .code_labels
-                            .iter()
-                            .map(|(name, &(_, address))| (name.clone(), address))
-                            .collect(),
-                    })
-                }),
-        );
-        self.active_states.append(&mut self.new_states);
+    fn step(&mut self, record_diagnostic: impl FnMut(ParseDiagnostic) + Send) -> bool {
+        let record_diagnostic = Mutex::new(record_diagnostic);
+        let (new_active_states, new_finished_results): (Vec<_>, LinkedList<_>) =
+            mem::take(&mut self.active_states)
+                .into_par_iter()
+                .partition_map(|state| state.step(&mut *record_diagnostic.lock().unwrap()));
+        for new_states in new_active_states {
+            self.active_states.extend(new_states);
+        }
+        self.finished_results
+            .extend(new_finished_results.into_iter().flatten());
         !self.active_states.is_empty()
     }
 }
@@ -178,8 +168,38 @@ where
     }
 
     fn step(
+        mut self,
+        mut record_diagnostic: impl FnMut(ParseDiagnostic),
+    ) -> Either<Vec<Self>, Option<ParsingResult>> {
+        let mut new_states = vec![];
+        while self.step_once(&mut new_states, &mut record_diagnostic) {
+            if !new_states.is_empty() {
+                new_states.push(self);
+                return Either::Left(new_states);
+            }
+        }
+        assert!(new_states.is_empty());
+        Either::Right(self.finish())
+    }
+
+    fn finish(self) -> Option<ParsingResult> {
+        Some(ParsingResult {
+            build_target: self.build_target,
+            target_build: self.target_build.map(|(bid, _)| bid)?,
+            user_settings: self.user_settings,
+            forced_output_format: self.forced_output_format.map(|(fmt, _)| fmt),
+            code: self.code_output,
+            labels: self
+                .code_labels
+                .iter()
+                .map(|(name, &(_, address))| (name.clone(), address))
+                .collect(),
+        })
+    }
+
+    fn step_once(
         &mut self,
-        new_states: &mut Vec<ParseSubState<'forced, I>>,
+        new_states: &mut Vec<Self>,
         mut record_diagnostic: impl FnMut(ParseDiagnostic),
     ) -> bool {
         let Some(statement) = self.statements.next() else {
@@ -243,7 +263,9 @@ where
                     }
                     NxpchOption::UserSettings(option) => {
                         let mut option = Cow::Borrowed(&option.0);
-                        if let Some(forced) = self.forced.options.get(self.user_settings.len()..) {
+                        if let Some(forced) = self.forced.options.get(self.user_settings.len()..)
+                            && !forced.is_empty()
+                        {
                             for (forced_value, settings) in forced.iter().zip(option.to_mut()) {
                                 settings.retain(|setting| &*setting.name == forced_value);
                             }
@@ -343,7 +365,7 @@ where
 
     fn make_forks<T>(
         &mut self,
-        new_states: &mut Vec<ParseSubState<'forced, I>>,
+        new_states: &mut Vec<Self>,
         values: impl IntoIterator<Item = T>,
         mut define_fork: impl FnMut(T, &mut Self),
     ) -> bool {
@@ -362,7 +384,7 @@ where
 
     fn make_deep_forks<T, TS>(
         &mut self,
-        new_states: &mut Vec<ParseSubState<'forced, I>>,
+        new_states: &mut Vec<Self>,
         values: impl IntoIterator<Item = TS>,
         mut define_fork: impl FnMut(T, &mut Self),
     ) -> bool
@@ -394,8 +416,10 @@ where
     }
 
     fn end_multi_code(&mut self, line_start: usize) {
+        if self.code_multi.is_some() {
+            self.code_multi_ended = Some(line_start.into());
+        }
         self.code_multi = None;
-        self.code_multi_ended = Some(line_start.into());
     }
 
     fn parse_code(
@@ -660,6 +684,18 @@ pub enum ParseDiagnostic {
     #[error(transparent)]
     #[diagnostic(transparent)]
     Preprocessor(#[from] PreprocessorDiagnostic),
+}
+
+impl Ord for ParseDiagnostic {
+    fn cmp(&self, other: &Self) -> Ordering {
+        order_diags_by_labels(self, other)
+    }
+}
+
+impl PartialOrd for ParseDiagnostic {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
 }
 
 fn diag<D>(mut recorder: impl FnMut(ParseDiagnostic)) -> impl FnMut(D)

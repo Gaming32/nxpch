@@ -3,13 +3,21 @@ use crate::option::OutputFormat;
 use crate::output::{IpsGenerateError, check_generate_ips, generate_ips, generate_pchtxt};
 use crate::parse::ParsingResult;
 use miette::Diagnostic;
-use std::collections::HashSet;
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+use std::cell::RefCell;
+use std::collections::{HashSet, LinkedList};
 use std::fmt::Write as FmtWrite;
-use std::io::{BufWriter, Seek, Write};
-use std::sync::Arc;
+use std::io::{BufWriter, IntoInnerError, Seek, Write};
+use std::mem;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use zip::result::ZipResult;
 use zip::write::FileOptions;
+use zip::{DateTime, System};
+
+const REPRO_FILE_OPTIONS: FileOptions<()> = FileOptions::DEFAULT
+    .last_modified_time(DateTime::DEFAULT)
+    .system(System::Unix);
 
 pub fn generate_zip(
     patches: Vec<ParsingResult>,
@@ -17,26 +25,45 @@ pub fn generate_zip(
     dir_segments: &[PathSegment],
     file_name: PathSegment,
     force_ips_default: bool,
-    mut record_diagnostic: impl FnMut(ZipGenerateDiagnostic),
+    record_diagnostic: &Mutex<impl FnMut(ZipGenerateDiagnostic) + Send>,
 ) -> ZipResult<()> {
-    let mut zip = zip::ZipWriter::new(BufWriter::new(output)).set_auto_large_file();
-
-    let mut made_directories = HashSet::new();
-    let assembler = Assembler::new();
-
     let all_force_pchtxt = patches
         .iter()
         .all(|r| r.forced_output_format == Some(OutputFormat::Pchtxt));
 
+    let record_diagnostic = |diag| record_diagnostic.lock().unwrap()(diag);
+    let all_assembled: LinkedList<_> = patches
+        .into_par_iter()
+        .map(|mut patch| {
+            thread_local! {
+                static ASSEMBLER: RefCell<Assembler> = RefCell::new(Assembler::new());
+            }
+            let compiled = ASSEMBLER.with_borrow(|assembler| {
+                assembler.assemble(
+                    patch.code.iter().cloned(),
+                    mem::take(&mut patch.labels),
+                    |diag| {
+                        record_diagnostic(diag.into());
+                    },
+                )
+            });
+            (patch, compiled)
+        })
+        .collect();
+
+    let mut zip = BufWriter::new(zip::ZipWriter::new(BufWriter::new(output)).set_auto_large_file());
+
     let mut built_path = String::new();
-    for patch in patches {
+    let mut made_directories = HashSet::new();
+    for (patch, compiled) in all_assembled {
         built_path.clear();
         for option in patch.user_settings.iter() {
             built_path.push_str(option);
             built_path.push('/');
             if !made_directories.contains(&built_path) {
                 made_directories.insert(built_path.clone());
-                zip.add_directory(&built_path, FileOptions::DEFAULT)?;
+                zip.get_mut()
+                    .add_directory(&built_path, REPRO_FILE_OPTIONS)?;
             }
         }
         for segment in dir_segments {
@@ -44,19 +71,16 @@ pub fn generate_zip(
             built_path.push('/');
             if !made_directories.contains(&built_path) {
                 made_directories.insert(built_path.clone());
-                zip.add_directory(&built_path, FileOptions::DEFAULT)?;
+                zip.get_mut()
+                    .add_directory(&built_path, REPRO_FILE_OPTIONS)?;
             }
         }
         file_name.format(&patch, &mut built_path);
 
-        let compiled = assembler.assemble(patch.code.iter().cloned(), patch.labels, |diag| {
-            record_diagnostic(diag.into());
-        });
         let forces_pchtxt = patch.forced_output_format == Some(OutputFormat::Pchtxt);
         let ips_generate_error = (!forces_pchtxt)
             .then(|| check_generate_ips(&compiled).err())
             .flatten();
-
         if force_ips_default && !all_force_pchtxt {
             if let Some(err) = ips_generate_error {
                 record_diagnostic(ZipGenerateDiagnostic::PchtxtRequired {
@@ -91,15 +115,20 @@ pub fn generate_zip(
         } else {
             built_path.push_str(".pchtxt");
         }
-        zip.start_file(&built_path, FileOptions::DEFAULT)?;
+
+        zip.get_mut().start_file(&built_path, REPRO_FILE_OPTIONS)?;
         if should_generate_ips {
             generate_ips(&compiled, &mut zip).map_err(|e| e.unwrap_io_err())?;
         } else {
             generate_pchtxt(&compiled, patch.target_build, &mut zip)?;
         }
+        zip.flush()?;
     }
 
-    zip.finish().and_then(|mut out| Ok(out.flush()?))
+    zip.into_inner()
+        .map_err(IntoInnerError::into_error)?
+        .finish()
+        .and_then(|mut out| Ok(out.flush()?))
 }
 
 #[derive(Copy, Clone, Debug)]

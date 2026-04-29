@@ -1,5 +1,5 @@
-use miette::{SourceOffset, SourceSpan};
-use std::cmp::max;
+use miette::{Diagnostic, SourceOffset, SourceSpan};
+use std::cmp::{Ordering, max};
 use std::fmt::Debug;
 use std::mem;
 use strsim::damerau_levenshtein;
@@ -106,6 +106,15 @@ pub fn closest_key(value: &str, keys: impl IntoIterator<Item = &'static str>) ->
     keys.into_iter()
         .min_by_key(|x| damerau_levenshtein(x, value))
         .unwrap()
+}
+
+pub fn order_diags_by_labels(diag: &impl Diagnostic, other: &impl Diagnostic) -> Ordering {
+    match (diag.labels(), other.labels()) {
+        (Some(these), Some(those)) => these.map(|x| *x.inner()).cmp(those.map(|x| *x.inner())),
+        (Some(_), None) => Ordering::Greater,
+        (None, Some(_)) => Ordering::Less,
+        (None, None) => Ordering::Equal,
+    }
 }
 
 #[cfg(test)]

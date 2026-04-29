@@ -1,23 +1,24 @@
 use crate::assemble::Assembler;
 use crate::option::OutputFormat;
 use crate::output::{check_generate_ips, generate_ips, generate_pchtxt};
-use crate::parse::{BuildTarget, ForcedBuildOption, parse_statements};
+use crate::parse::{BuildTarget, ForcedBuildOption, ParsingResult, parse_statements};
 use crate::pchtxt::{pchtxt_to_nxpch, pchtxt_to_patches};
 use crate::pre_parse::PreParsedCode;
 use crate::preprocessor::MacroDefine;
 use crate::zip_gen::{PathSegment, generate_zip, generate_zip_filename};
 use clap::{Parser, Subcommand};
 use clap_stdin::{FileOrStdin, FileOrStdout};
-use indexmap::IndexSet;
 use miette::{
     Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity, miette,
 };
+use rayon::prelude::{IntoParallelIterator, ParallelIterator};
+use std::collections::{BTreeSet, LinkedList};
 use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufWriter, Write, stdout};
 use std::iter;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 
 mod assemble;
@@ -99,7 +100,7 @@ enum PchtxtCommands {
 
 fn main() -> miette::Result<()> {
     miette::set_panic_hook();
-    let args = RootArgs::parse();
+    let args = RootArgs::parse_from(["nxpch.exe", "build", "sample.nxpch"]);
     match args.command {
         Commands::Build {
             source,
@@ -113,7 +114,11 @@ fn main() -> miette::Result<()> {
                 (parsed.statements, parsed.diagnostics)
             })?;
 
-            let mut parse_diags = IndexSet::new();
+            let mut parse_diags = BTreeSet::new();
+            println!(
+                "Compiling nxpch file in memory with {} threads...",
+                rayon::current_num_threads()
+            );
             let generated_results = parse_statements(
                 pre_parsed_statements.into_iter().map(|(_, s)| s),
                 define,
@@ -222,68 +227,76 @@ fn main() -> miette::Result<()> {
                         .with_context(|| format!("{WRITING_FILE}{STDOUT}"))?;
                 }
             } else {
-                let mut diags = vec![];
-                let mut record_diagnostic = |diag| diags.push(diag);
-                let emulator_temp = if !emulator.is_empty() {
-                    println!("Generating emulator zip");
-                    let mut temp = NamedTempFile::new()
+                struct ZipGen {
+                    label: &'static str,
+                    dir_segments: &'static [PathSegment],
+                    file_name: PathSegment,
+                    force_ips_default: bool,
+                    target: Vec<ParsingResult>,
+                }
+
+                let mut gens = Vec::with_capacity(2);
+                if !emulator.is_empty() {
+                    gens.push(ZipGen {
+                        label: "emulator",
+                        dir_segments: &[PathSegment::ModName, PathSegment::Static("exefs")],
+                        file_name: PathSegment::BuildId,
+                        force_ips_default: false,
+                        target: emulator,
+                    });
+                }
+                if !hardware.is_empty() {
+                    gens.push(ZipGen {
+                        label: "hardware",
+                        dir_segments: if hardware
+                            .iter()
+                            .all(|r| r.forced_output_format == Some(OutputFormat::Pchtxt))
+                        {
+                            &[
+                                PathSegment::Static("switch"),
+                                PathSegment::Static("ipswitch"),
+                                PathSegment::ModName,
+                            ] as &[_]
+                        } else {
+                            &[
+                                PathSegment::Static("atmosphere"),
+                                PathSegment::Static("exefs_patches"),
+                                PathSegment::ModName,
+                            ]
+                        },
+                        file_name: PathSegment::BuildId,
+                        force_ips_default: true,
+                        target: hardware,
+                    });
+                }
+
+                println!("Generating zip files...");
+                let mut diags = Vec::new();
+                let record_diagnostic = Mutex::new(|diag| diags.push(diag));
+                let results: LinkedList<_> = gens
+                    .into_par_iter()
+                    .map(|mut zip_gen| {
+                        let mut temp = NamedTempFile::new()
+                            .into_diagnostic()
+                            .with_context(|| format!("Creating {} zip tempfile", zip_gen.label))?;
+                        zip_gen.target.sort_unstable();
+                        let filename = generate_zip_filename(&zip_gen.target, zip_gen.label)
+                            .map_err(&mut *record_diagnostic.lock().unwrap())
+                            .ok();
+                        generate_zip(
+                            zip_gen.target,
+                            temp.as_file_mut(),
+                            zip_gen.dir_segments,
+                            zip_gen.file_name,
+                            zip_gen.force_ips_default,
+                            &record_diagnostic,
+                        )
                         .into_diagnostic()
-                        .with_context(|| "Creating emulator zip tempfile")?;
-                    let filename = generate_zip_filename(&emulator, "emulator")
-                        .map_err(&mut record_diagnostic)
-                        .ok();
-                    generate_zip(
-                        emulator,
-                        temp.as_file_mut(),
-                        &[PathSegment::ModName, PathSegment::Static("exefs")],
-                        PathSegment::BuildId,
-                        false,
-                        &mut record_diagnostic,
-                    )
-                    .into_diagnostic()
-                    .with_context(|| "Generating emulator zip")?;
-                    filename.map(|name| (temp, name))
-                } else {
-                    None
-                };
-                let hardware_temp = if !hardware.is_empty() {
-                    println!("Generating hardware zip");
-                    let mut temp = NamedTempFile::new()
-                        .into_diagnostic()
-                        .with_context(|| "Creating hardware zip tempfile")?;
-                    let filename = generate_zip_filename(&hardware, "hardware")
-                        .map_err(&mut record_diagnostic)
-                        .ok();
-                    let path_segments = if hardware
-                        .iter()
-                        .all(|r| r.forced_output_format == Some(OutputFormat::Pchtxt))
-                    {
-                        &[
-                            PathSegment::Static("switch"),
-                            PathSegment::Static("ipswitch"),
-                            PathSegment::ModName,
-                        ] as &[_]
-                    } else {
-                        &[
-                            PathSegment::Static("atmosphere"),
-                            PathSegment::Static("exefs_patches"),
-                            PathSegment::ModName,
-                        ]
-                    };
-                    generate_zip(
-                        hardware,
-                        temp.as_file_mut(),
-                        path_segments,
-                        PathSegment::BuildId,
-                        true,
-                        &mut record_diagnostic,
-                    )
-                    .into_diagnostic()
-                    .with_context(|| "Generating hardware zip")?;
-                    filename.map(|name| (temp, name))
-                } else {
-                    None
-                };
+                        .with_context(|| format!("Generating {} zip", zip_gen.label))?;
+                        Ok(filename.map(|name| (temp, name)))
+                    })
+                    .filter_map(Result::transpose)
+                    .collect::<miette::Result<_>>()?;
                 check_error_count(print_diags(diags, &filename, &source))?;
 
                 let output_dir = if filename == STDIN {
@@ -296,18 +309,13 @@ fn main() -> miette::Result<()> {
                         Path::new("")
                     }
                 };
-                let generate_output = |temp: Option<(NamedTempFile, _)>| -> miette::Result<()> {
-                    if let Some((temp, filename)) = temp {
-                        let out_path = output_dir.join(filename);
-                        temp.persist(&out_path)
-                            .into_diagnostic()
-                            .with_context(|| format!("{WRITING_FILE}{}", out_path.display()))?;
-                        println!("Wrote {}", out_path.display());
-                    }
-                    Ok(())
-                };
-                generate_output(emulator_temp)?;
-                generate_output(hardware_temp)?;
+                for (temp, filename) in results {
+                    let out_path = output_dir.join(filename);
+                    temp.persist(&out_path)
+                        .into_diagnostic()
+                        .with_context(|| format!("{WRITING_FILE}{}", out_path.display()))?;
+                    println!("Wrote {}", out_path.display());
+                }
             }
         }
         Commands::Import(ImportCommands::Pchtxt { source, output }) => {
