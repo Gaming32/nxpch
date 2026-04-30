@@ -100,7 +100,7 @@ enum PchtxtCommands {
 
 fn main() -> miette::Result<()> {
     miette::set_panic_hook();
-    let args = RootArgs::parse_from(["nxpch.exe", "build", "sample.nxpch"]);
+    let args = RootArgs::parse();
     match args.command {
         Commands::Build {
             source,
