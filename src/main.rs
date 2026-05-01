@@ -9,11 +9,11 @@ use crate::zip_gen::{PathSegment, generate_zip, generate_zip_filename};
 use clap::{Parser, Subcommand};
 use clap_stdin::{FileOrStdin, FileOrStdout};
 use miette::{
-    Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity, miette,
+    Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity, bail,
+    miette,
 };
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::collections::{BTreeSet, LinkedList};
-use std::fmt::Display;
 use std::fs::File;
 use std::io::{BufWriter, Write, stdout};
 use std::iter;
@@ -136,18 +136,18 @@ fn main() -> miette::Result<()> {
             );
             check_error_count(print_diags(parse_diags, &filename, &source))?;
 
+            if generated_results.is_empty() {
+                bail!("Code generated no output");
+            }
+
             let (mut emulator, mut hardware): (Vec<_>, _) = generated_results
                 .into_iter()
                 .partition(|x| x.build_target == BuildTarget::Emulator);
             if let Some(single_path) = single {
                 fn generate_count_error(count: usize) -> miette::Result<()> {
-                    print_error_and_exit(
-                        format_args!(
-                            "--single was used, but {count} outputs were generated (expected 1).",
-                        ),
-                        Some(
-                            "Consider using --target, --build, and --setting to reduce output count.",
-                        ),
+                    bail!(
+                        help = "Consider using --target, --build, and --setting to reduce output count.",
+                        "--single was used, but {count} outputs were generated (expected 1).",
                     )
                 }
                 match (emulator.len(), hardware.len()) {
@@ -160,7 +160,7 @@ fn main() -> miette::Result<()> {
                     }
                     (1, 0) => {}
                     (0, 1) => emulator = hardware,
-                    _ => generate_count_error(emulator.len() + hardware.len())?,
+                    _ => return generate_count_error(emulator.len() + hardware.len()),
                 }
 
                 let to_build = emulator.into_iter().next().unwrap();
@@ -190,9 +190,8 @@ fn main() -> miette::Result<()> {
                 if let Some(path) = single_path {
                     if path.is_file() {
                         let path = path.filename();
-                        match path
-                            .rsplit_once('.')
-                            .map(|(_, ext)| ext.to_lowercase())
+                        match file_extension(path)
+                            .map(|ext| ext.to_lowercase())
                             .as_deref()
                         {
                             Some("ips") => generate_ips(&built, open_file(path)?)
@@ -202,12 +201,11 @@ fn main() -> miette::Result<()> {
                                     .into_diagnostic()
                                     .with_context(|| format!("{WRITING_FILE}{path}"))?
                             }
-                            Some(ext) => print_error_and_exit(
-                                format_args!(
+                            Some(ext) => {
+                                return Err(miette!(
                                     "Unknown file extension for --single writing .{ext}. Please use .ips or .pchtxt.",
-                                ),
-                                None,
-                            )?,
+                                ));
+                            }
                             None => write_to_path_prefix(path)?,
                         }
                     } else {
@@ -216,17 +214,16 @@ fn main() -> miette::Result<()> {
                             .with_context(|| format!("{WRITING_FILE}{STDOUT}"))?;
                     }
                 } else if filename != STDIN {
-                    write_to_path_prefix(
-                        filename
-                            .rsplit_once('.')
-                            .map_or(&filename, |(stem, _)| stem),
-                    )?;
+                    write_to_path_prefix(file_stem(&filename).unwrap_or("dotdot"))?;
                 } else {
                     generate_pchtxt(&built, to_build.target_build, stdout())
                         .into_diagnostic()
                         .with_context(|| format!("{WRITING_FILE}{STDOUT}"))?;
                 }
             } else {
+                println!("Generating zip files...");
+                let fallback_filename = file_stem(&filename).unwrap_or("dotdot");
+
                 struct ZipGen {
                     label: &'static str,
                     dir_segments: &'static [PathSegment],
@@ -271,8 +268,6 @@ fn main() -> miette::Result<()> {
                         target: hardware,
                     });
                 }
-
-                println!("Generating zip files...");
                 let mut diags = Vec::new();
                 let record_diagnostic = Mutex::new(|diag| diags.push(diag));
                 let results: LinkedList<_> = gens
@@ -282,11 +277,17 @@ fn main() -> miette::Result<()> {
                             .into_diagnostic()
                             .with_context(|| format!("Creating {} zip tempfile", zip_gen.label))?;
                         zip_gen.target.sort_unstable();
-                        let filename = generate_zip_filename(&zip_gen.target, zip_gen.label)
-                            .map_err(&mut *record_diagnostic.lock().unwrap())
-                            .ok();
+                        let filename = generate_zip_filename(
+                            &zip_gen.target,
+                            fallback_filename,
+                            zip_gen.label,
+                            &record_diagnostic,
+                        )
+                        .map_err(&mut *record_diagnostic.lock().unwrap())
+                        .ok();
                         generate_zip(
                             zip_gen.target,
+                            fallback_filename,
                             temp.as_file_mut(),
                             zip_gen.dir_segments,
                             zip_gen.file_name,
@@ -431,10 +432,14 @@ fn check_error_count(error_count: usize) -> miette::Result<()> {
     }
 }
 
-fn print_error_and_exit(error: impl Display, tip: Option<&str>) -> miette::Result<()> {
-    if let Some(help) = tip {
-        Err(miette!(help = help, "{error}"))
-    } else {
-        Err(miette!("{error}"))
-    }
+fn file_stem(x: &str) -> Option<&str> {
+    Path::new(x)
+        .file_stem()
+        .map(|sub| unsafe { str::from_utf8_unchecked(sub.as_encoded_bytes()) })
+}
+
+fn file_extension(x: &str) -> Option<&str> {
+    Path::new(x)
+        .extension()
+        .map(|sub| unsafe { str::from_utf8_unchecked(sub.as_encoded_bytes()) })
 }

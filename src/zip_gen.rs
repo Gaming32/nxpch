@@ -1,7 +1,7 @@
 use crate::assemble::{AssembleDiagnostic, Assembler};
 use crate::option::OutputFormat;
 use crate::output::{IpsGenerateError, check_generate_ips, generate_ips, generate_pchtxt};
-use crate::parse::ParsingResult;
+use crate::parse::{ParsingResult, SettingsVec};
 use miette::Diagnostic;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::cell::RefCell;
@@ -21,6 +21,7 @@ const REPRO_FILE_OPTIONS: FileOptions<()> = FileOptions::DEFAULT
 
 pub fn generate_zip(
     patches: Vec<ParsingResult>,
+    fallback_filename: &str,
     output: impl Write + Seek,
     dir_segments: &[PathSegment],
     file_name: PathSegment,
@@ -67,7 +68,7 @@ pub fn generate_zip(
             }
         }
         for segment in dir_segments {
-            segment.format(&patch, &mut built_path);
+            segment.format(&patch, fallback_filename, &mut built_path);
             built_path.push('/');
             if !made_directories.contains(&built_path) {
                 made_directories.insert(built_path.clone());
@@ -75,7 +76,7 @@ pub fn generate_zip(
                     .add_directory(&built_path, REPRO_FILE_OPTIONS)?;
             }
         }
-        file_name.format(&patch, &mut built_path);
+        file_name.format(&patch, fallback_filename, &mut built_path);
 
         let forces_pchtxt = patch.forced_output_format == Some(OutputFormat::Pchtxt);
         let ips_generate_error = (!forces_pchtxt)
@@ -84,13 +85,13 @@ pub fn generate_zip(
         if force_ips_default && !all_force_pchtxt {
             if let Some(err) = ips_generate_error {
                 record_diagnostic(ZipGenerateDiagnostic::PchtxtRequired {
-                    settings: Arc::unwrap_or_clone(patch.user_settings),
+                    settings: patch.user_settings,
                     cause: err,
                 });
                 continue;
             } else if forces_pchtxt {
                 record_diagnostic(ZipGenerateDiagnostic::PchtxtPartiallyRequested {
-                    settings: Arc::unwrap_or_clone(patch.user_settings),
+                    settings: patch.user_settings,
                 });
                 continue;
             }
@@ -100,7 +101,7 @@ pub fn generate_zip(
             Some(OutputFormat::Ips) => {
                 if let Some(err) = ips_generate_error {
                     record_diagnostic(ZipGenerateDiagnostic::IpsError {
-                        settings: Arc::unwrap_or_clone(patch.user_settings),
+                        settings: patch.user_settings,
                         cause: err,
                     });
                     continue;
@@ -139,10 +140,12 @@ pub enum PathSegment {
 }
 
 impl PathSegment {
-    fn format(self, patch: &ParsingResult, output: &mut String) {
+    fn format(self, patch: &ParsingResult, fallback_filename: &str, output: &mut String) {
         match self {
             PathSegment::Static(text) => output.push_str(text),
-            PathSegment::ModName => output.push_str("TEST"), // TODO: Mod name
+            PathSegment::ModName => {
+                output.push_str(patch.mod_name.as_deref().unwrap_or(fallback_filename))
+            }
             PathSegment::BuildId => {
                 let _ = write!(output, "{:X}", patch.target_build);
             }
@@ -151,14 +154,87 @@ impl PathSegment {
 }
 
 pub fn generate_zip_filename(
-    _from: &[ParsingResult],
+    from: &[ParsingResult],
+    fallback_filename: &str,
     target: &str,
+    record_diagnostic: &Mutex<impl FnMut(ZipGenerateDiagnostic) + Send>,
 ) -> Result<String, ZipGenerateDiagnostic> {
-    Ok(format!("TEST+{target}.zip")) // TODO: Mod name + version
+    fn find_equal_value<'a, T: Copy + PartialEq>(
+        from: &'a [ParsingResult],
+        record_diagnostic: &Mutex<impl FnMut(ZipGenerateDiagnostic) + Send>,
+        getter: impl Fn(&'a ParsingResult) -> T,
+        gen_diag: impl Fn(T, T, SettingsVec) -> ZipGenerateDiagnostic,
+    ) -> T {
+        let mut iter = from.iter();
+        let value = getter(iter.next().unwrap());
+        for remaining in iter {
+            let other_value = getter(remaining);
+            if other_value != value {
+                record_diagnostic.lock().unwrap()(gen_diag(
+                    value,
+                    other_value,
+                    remaining.user_settings.clone(),
+                ));
+            }
+        }
+        value
+    }
+
+    let mod_name = find_equal_value(
+        from,
+        record_diagnostic,
+        |p| &p.mod_name,
+        |first, second, second_settings| ZipGenerateDiagnostic::InconsistentModNames {
+            first_name: first.clone().unwrap_or_else(|| "<unspecified>".into()),
+            second_name: second.clone().unwrap_or_else(|| "<unspecified>".into()),
+            second_settings,
+        },
+    )
+    .as_deref()
+    .unwrap_or(fallback_filename);
+    let mod_version = find_equal_value(
+        from,
+        record_diagnostic,
+        |p| &p.mod_version,
+        |first, second, second_settings| ZipGenerateDiagnostic::InconsistentModVersions {
+            first_version: first.clone(),
+            second_version: second.clone(),
+            second_settings,
+        },
+    );
+    Ok(format!("{mod_name}-{mod_version}+{target}.zip"))
 }
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum ZipGenerateDiagnostic {
+    #[error("The generated mod names differ, the first will be used.")]
+    #[diagnostic(
+        code(zip::inconsistent_mod_names),
+        severity(warn),
+        help(
+            "The first name encountered was {first_name:?}. The inconsistency occurred under the setting {second_settings:?} with the name {second_name:?}."
+        )
+    )]
+    InconsistentModNames {
+        first_name: Arc<str>,
+        second_name: Arc<str>,
+        second_settings: SettingsVec,
+    },
+
+    #[error("The generated mod versions differ, the first will be used.")]
+    #[diagnostic(
+        code(zip::inconsistent_mod_versions),
+        severity(warn),
+        help(
+            "The first version encountered was {first_version:?}. The inconsistency occurred under the setting {second_settings:?} with the version {second_version:?}."
+        )
+    )]
+    InconsistentModVersions {
+        first_version: Arc<str>,
+        second_version: Arc<str>,
+        second_settings: SettingsVec,
+    },
+
     #[error("The user setting {settings:?} requires pchtxt while building for real hardware.")]
     #[diagnostic(
         code(zip::pchtxt_required),
@@ -167,7 +243,7 @@ pub enum ZipGenerateDiagnostic {
         )
     )]
     PchtxtRequired {
-        settings: Vec<Arc<str>>,
+        settings: SettingsVec,
 
         #[source]
         #[diagnostic_source]
@@ -183,12 +259,12 @@ pub enum ZipGenerateDiagnostic {
             "Force pchtxt globally by using `output_format = \"pchtxt\"` at the top. You can also surround it with `#if HARDWARE` to make it only apply to real hardware."
         )
     )]
-    PchtxtPartiallyRequested { settings: Vec<Arc<str>> },
+    PchtxtPartiallyRequested { settings: SettingsVec },
 
     #[error("The user setting {settings:?} forced IPS format, which generated an error.")]
     #[diagnostic(code(zip::ips_error))]
     IpsError {
-        settings: Vec<Arc<str>>,
+        settings: SettingsVec,
 
         #[source]
         #[diagnostic_source]

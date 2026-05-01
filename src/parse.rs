@@ -18,12 +18,16 @@ use std::{mem, vec};
 use subslice_offset::SubsliceOffset;
 use thiserror::Error;
 
+pub type SettingsVec = Arc<Vec<Arc<str>>>;
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParsingResult {
     pub build_target: BuildTarget,
+    pub mod_name: Option<Arc<str>>,
+    pub mod_version: Arc<str>,
     pub target_build: BuildId,
     pub forced_output_format: Option<OutputFormat>,
-    pub user_settings: Arc<Vec<Arc<str>>>,
+    pub user_settings: SettingsVec,
     pub code: Arc<Vec<(u32, ParsedCode)>>,
     pub labels: Vec<(Arc<str>, u32)>,
 }
@@ -135,9 +139,11 @@ struct ParseSubState<'forced, I> {
     forced: &'forced ForcedBuildOption,
 
     build_target: BuildTarget,
+    mod_name: Option<Arc<str>>,
+    mod_version: Option<Arc<str>>,
     target_build: Option<(BuildId, SourceSpan)>,
     pointer_offset: i32,
-    user_settings: Arc<Vec<Arc<str>>>,
+    user_settings: SettingsVec,
     forced_output_format: Option<(OutputFormat, SourceSpan)>,
 
     code_output: Arc<Vec<(u32, ParsedCode)>>,
@@ -156,6 +162,8 @@ where
             forced: filters,
             preprocessor: PreprocessorState::default(),
             build_target: BuildTarget::Emulator,
+            mod_name: None,
+            mod_version: None,
             target_build: None,
             pointer_offset: 0,
             user_settings: Arc::new(vec![]),
@@ -185,6 +193,10 @@ where
     fn finish(self) -> Option<ParsingResult> {
         Some(ParsingResult {
             build_target: self.build_target,
+            mod_name: self.mod_name,
+            mod_version: self
+                .mod_version
+                .unwrap_or_else(|| FALLBACK_MOD_VERSION.into()),
             target_build: self.target_build.map(|(bid, _)| bid)?,
             user_settings: self.user_settings,
             forced_output_format: self.forced_output_format.map(|(fmt, _)| fmt),
@@ -204,10 +216,13 @@ where
     ) -> bool {
         let Some(statement) = self.statements.next() else {
             mem::take(&mut self.preprocessor).end(diag(&mut record_diagnostic));
-            if self.target_build.is_none()
-                && (!self.code_output.is_empty() || !self.code_labels.is_empty())
-            {
-                record_diagnostic(ParseDiagnostic::MissingBuildId);
+            if !self.code_output.is_empty() || !self.code_labels.is_empty() {
+                if self.mod_version.is_none() {
+                    record_diagnostic(ParseDiagnostic::MissingModVersion);
+                }
+                if self.target_build.is_none() {
+                    record_diagnostic(ParseDiagnostic::MissingBuildId);
+                }
             }
             return false;
         };
@@ -217,6 +232,8 @@ where
                     return true;
                 }
                 match &*option {
+                    NxpchOption::ModName(option) => self.mod_name = Some(option.0.clone()),
+                    NxpchOption::ModVersion(option) => self.mod_version = Some(option.0.clone()),
                     NxpchOption::TargetBuild(option) => match self.target_build {
                         Some((_, original_span)) => {
                             record_diagnostic(ParseDiagnostic::DuplicateBuildId {
@@ -568,8 +585,14 @@ where
     }
 }
 
+const FALLBACK_MOD_VERSION: &str = "0.1.0";
+
 #[derive(Debug, PartialEq, Eq, Hash, Diagnostic, Error)]
 pub enum ParseDiagnostic {
+    #[error("Mod version was never specified, falling back to \"{FALLBACK_MOD_VERSION}\".")]
+    #[diagnostic(code(parse::missing_mod_version), severity(warn))]
+    MissingModVersion,
+
     #[error("Build ID specified more than once")]
     #[diagnostic(code(parse::duplicate_build_id))]
     DuplicateBuildId {

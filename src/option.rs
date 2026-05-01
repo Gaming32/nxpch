@@ -8,6 +8,8 @@ use thiserror::Error;
 
 #[derive(Clone, Debug)]
 pub enum NxpchOption {
+    ModName(ModNameOption),
+    ModVersion(ModVersionOption),
     TargetBuild(TargetBuildOption),
     TargetBuilds(TargetBuildsOption),
     PointerOffset(PointerOffsetOption),
@@ -18,6 +20,8 @@ pub enum NxpchOption {
 impl NxpchOption {
     pub fn parse(option_name: &str, content: &str) -> Result<Self, OptionParseError> {
         Ok(match option_name {
+            "mod_name" => NxpchOption::ModName(json5::from_str(content)?),
+            "mod_version" => NxpchOption::ModVersion(json5::from_str(content)?),
             "target_build" => NxpchOption::TargetBuild(json5::from_str(content)?),
             "target_builds" => NxpchOption::TargetBuilds(json5::from_str(content)?),
             "pointer_offset" => NxpchOption::PointerOffset(json5::from_str(content)?),
@@ -48,6 +52,8 @@ impl NxpchOption {
             };
         }
         match self {
+            Self::ModName(_) => {}
+            Self::ModVersion(_) => {}
             Self::TargetBuild(_) => {}
             Self::TargetBuilds(entries) => {
                 let nodes = match json5_nodes::parse(json) {
@@ -144,6 +150,12 @@ pub enum OptionParseError {
     #[error("Unknown option")]
     UnknownOption { closest: &'static str },
 }
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModNameOption(pub Arc<str>);
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModVersionOption(pub Arc<str>);
 
 pub type BuildId = u128;
 

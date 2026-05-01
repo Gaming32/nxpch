@@ -1,5 +1,8 @@
 // Everything Hurts 2
 
+mod_name = "Everything Hurts 2"
+mod_version = "1.0.1"
+
 pointer_offset = 0x100
 
 target_build = 0xF18FF3CFCBAD0884D72ABBEB6C540D6B
