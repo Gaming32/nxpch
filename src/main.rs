@@ -10,7 +10,7 @@ use clap::{Parser, Subcommand};
 use clap_stdin::{FileOrStdin, FileOrStdout};
 use miette::{
     Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity, bail,
-    miette,
+    ensure, miette,
 };
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::collections::{BTreeSet, LinkedList};
@@ -136,9 +136,7 @@ fn main() -> miette::Result<()> {
             );
             check_error_count(print_diags(parse_diags, &filename, &source))?;
 
-            if generated_results.is_empty() {
-                bail!("Code generated no output");
-            }
+            ensure!(!generated_results.is_empty(), "Code generated no output");
 
             let (mut emulator, mut hardware): (Vec<_>, _) = generated_results
                 .into_iter()
@@ -201,11 +199,9 @@ fn main() -> miette::Result<()> {
                                     .into_diagnostic()
                                     .with_context(|| format!("{WRITING_FILE}{path}"))?
                             }
-                            Some(ext) => {
-                                return Err(miette!(
-                                    "Unknown file extension for --single writing .{ext}. Please use .ips or .pchtxt.",
-                                ));
-                            }
+                            Some(ext) => bail!(
+                                "Unknown file extension for --single writing .{ext}. Please use .ips or .pchtxt.",
+                            ),
                             None => write_to_path_prefix(path)?,
                         }
                     } else {
