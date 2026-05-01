@@ -115,7 +115,7 @@ where
 
     fn step(&mut self, record_diagnostic: impl FnMut(ParseDiagnostic) + Send) -> bool {
         let record_diagnostic = Mutex::new(record_diagnostic);
-        let (new_active_states, new_finished_results): (Vec<_>, LinkedList<_>) =
+        let (new_active_states, new_finished_results): (LinkedList<_>, LinkedList<_>) =
             mem::take(&mut self.active_states)
                 .into_par_iter()
                 .partition_map(|state| state.step(&mut *record_diagnostic.lock().unwrap()));

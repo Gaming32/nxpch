@@ -117,7 +117,7 @@ fn main() -> miette::Result<()> {
             let mut parse_diags = BTreeSet::new();
             println!(
                 "Compiling nxpch file in memory with {} threads...",
-                rayon::current_num_threads()
+                rayon::current_num_threads(),
             );
             let generated_results = parse_statements(
                 pre_parsed_statements.into_iter().map(|(_, s)| s),
@@ -235,7 +235,9 @@ fn main() -> miette::Result<()> {
                     target: Vec<ParsingResult>,
                 }
 
-                let mut gens = Vec::with_capacity(2);
+                let mut gens = Vec::with_capacity(
+                    (!emulator.is_empty()) as usize + (!hardware.is_empty()) as usize,
+                );
                 if !emulator.is_empty() {
                     gens.push(ZipGen {
                         label: "emulator",

@@ -24,7 +24,7 @@ impl MacroDefine {
     pub fn create_const(name: String, expansion: String) -> Self {
         Self {
             declaration_range: (0, name.len()).into(),
-            expansion_offset: (name.len() + 1).into(),
+            expansion_offset: (name.len() + (!expansion.is_empty()) as usize).into(),
             name,
             expansion,
             args: None,
