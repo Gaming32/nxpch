@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arcstr = { version = "1.2.0", features = ["serde"] }
 capstone = { version = "0.14.0", default-features = false, features = ["std", "full", "arch_arm64"] }
 clap = { version = "4.6.1", features = ["derive"] }
 clap-stdin = "0.8.1"

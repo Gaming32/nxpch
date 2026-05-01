@@ -2,6 +2,7 @@ use crate::assemble::{AssembleDiagnostic, Assembler};
 use crate::option::OutputFormat;
 use crate::output::{IpsGenerateError, check_generate_ips, generate_ips, generate_pchtxt};
 use crate::parse::{ParsingResult, SettingsVec};
+use arcstr::ArcStr;
 use miette::Diagnostic;
 use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 use std::cell::RefCell;
@@ -9,7 +10,7 @@ use std::collections::{HashSet, LinkedList};
 use std::fmt::Write as FmtWrite;
 use std::io::{BufWriter, IntoInnerError, Seek, Write};
 use std::mem;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use thiserror::Error;
 use zip::result::ZipResult;
 use zip::write::FileOptions;
@@ -180,18 +181,20 @@ pub fn generate_zip_filename(
         value
     }
 
+    const UNSPECIFIED: ArcStr = arcstr::literal!("<unspecified>");
     let mod_name = find_equal_value(
         from,
         record_diagnostic,
         |p| &p.mod_name,
         |first, second, second_settings| ZipGenerateDiagnostic::InconsistentModNames {
-            first_name: first.clone().unwrap_or_else(|| "<unspecified>".into()),
-            second_name: second.clone().unwrap_or_else(|| "<unspecified>".into()),
+            first_name: first.clone().unwrap_or(UNSPECIFIED),
+            second_name: second.clone().unwrap_or(UNSPECIFIED),
             second_settings,
         },
     )
     .as_deref()
     .unwrap_or(fallback_filename);
+
     let mod_version = find_equal_value(
         from,
         record_diagnostic,
@@ -216,8 +219,8 @@ pub enum ZipGenerateDiagnostic {
         )
     )]
     InconsistentModNames {
-        first_name: Arc<str>,
-        second_name: Arc<str>,
+        first_name: ArcStr,
+        second_name: ArcStr,
         second_settings: SettingsVec,
     },
 
@@ -230,8 +233,8 @@ pub enum ZipGenerateDiagnostic {
         )
     )]
     InconsistentModVersions {
-        first_version: Arc<str>,
-        second_version: Arc<str>,
+        first_version: ArcStr,
+        second_version: ArcStr,
         second_settings: SettingsVec,
     },
 

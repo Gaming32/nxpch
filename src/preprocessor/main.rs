@@ -1,6 +1,7 @@
 use crate::preprocessor::expr::{ExprDiagnostic, evaluate};
 use crate::preprocessor::{MacroDefine, MacroDiagnostic};
 use crate::utils::{Combine, json5_error_to_offset};
+use arcstr::ArcStr;
 use miette::{Diagnostic, SourceOffset, SourceSpan};
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -17,18 +18,18 @@ pub struct PreprocessorDirective {
 
 #[derive(Clone, Debug)]
 pub enum PreprocessorDirectiveInstruction {
-    If(Arc<str>),
-    ElseIf(Arc<str>),
+    If(ArcStr),
+    ElseIf(ArcStr),
     Else,
     EndIf,
-    IfDefined(Arc<str>),
-    IfNotDefined(Arc<str>),
-    ElseIfDefined(Arc<str>),
-    ElseIfNotDefined(Arc<str>),
+    IfDefined(ArcStr),
+    IfNotDefined(ArcStr),
+    ElseIfDefined(ArcStr),
+    ElseIfNotDefined(ArcStr),
     Define(Arc<MacroDefine>),
-    Undefine(Arc<str>),
-    Error(Arc<str>),
-    Warning(Arc<str>),
+    Undefine(ArcStr),
+    Error(ArcStr),
+    Warning(ArcStr),
 }
 
 impl PreprocessorDirective {
@@ -93,7 +94,7 @@ impl PreprocessorDirective {
         }
         macro_rules! require_string {
             ($variant:ident, $what:literal) => {
-                match json5::from_str::<Arc<str>>(body) {
+                match json5::from_str::<ArcStr>(body) {
                     Ok(s) => construct_result!(PDI::$variant(s)),
                     Err(err) => {
                         record_diagnostic(PreprocessorDiagnostic::InvalidString {
@@ -156,7 +157,7 @@ impl PreprocessorDirectiveInstruction {
 
 #[derive(Clone, Debug, Default)]
 pub struct PreprocessorState {
-    defines: Arc<HashMap<Arc<str>, Arc<MacroDefine>>>,
+    defines: Arc<HashMap<ArcStr, Arc<MacroDefine>>>,
     activity: Arc<Vec<ActivityState>>,
 }
 

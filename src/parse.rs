@@ -2,6 +2,7 @@ use crate::option::{BuildId, NxpchOption, OutputFormat};
 use crate::pre_parse::PreParsedStatement;
 use crate::preprocessor::{MacroDefine, PreprocessorDiagnostic, PreprocessorState};
 use crate::utils::{AsNum, closest_key, order_diags_by_labels};
+use arcstr::ArcStr;
 use clap::ValueEnum;
 use itertools::Either;
 use miette::{Diagnostic, SourceOffset, SourceSpan};
@@ -18,18 +19,18 @@ use std::{mem, vec};
 use subslice_offset::SubsliceOffset;
 use thiserror::Error;
 
-pub type SettingsVec = Arc<Vec<Arc<str>>>;
+pub type SettingsVec = Arc<Vec<ArcStr>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParsingResult {
     pub build_target: BuildTarget,
-    pub mod_name: Option<Arc<str>>,
-    pub mod_version: Arc<str>,
+    pub mod_name: Option<ArcStr>,
+    pub mod_version: ArcStr,
     pub target_build: BuildId,
     pub forced_output_format: Option<OutputFormat>,
     pub user_settings: SettingsVec,
     pub code: Arc<Vec<(u32, ParsedCode)>>,
-    pub labels: Vec<(Arc<str>, u32)>,
+    pub labels: Vec<(ArcStr, u32)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -96,8 +97,8 @@ pub enum ParsedCode {
     Long(u64),
     Float(OrderedFloat<f32>),
     Double(OrderedFloat<f64>),
-    String(Arc<str>),
-    Asm(Arc<str>, u64, SourceSpan),
+    String(ArcStr),
+    Asm(ArcStr, u64, SourceSpan),
 }
 
 #[derive(Clone)]
@@ -139,8 +140,8 @@ struct ParseSubState<'forced, I> {
     forced: &'forced ForcedBuildOption,
 
     build_target: BuildTarget,
-    mod_name: Option<Arc<str>>,
-    mod_version: Option<Arc<str>>,
+    mod_name: Option<ArcStr>,
+    mod_version: Option<ArcStr>,
     target_build: Option<(BuildId, SourceSpan)>,
     pointer_offset: i32,
     user_settings: SettingsVec,
@@ -149,7 +150,7 @@ struct ParseSubState<'forced, I> {
     code_output: Arc<Vec<(u32, ParsedCode)>>,
     code_multi: Option<u32>,
     code_multi_ended: Option<SourceOffset>,
-    code_labels: Arc<HashMap<Arc<str>, (SourceSpan, u32)>>,
+    code_labels: Arc<HashMap<ArcStr, (SourceSpan, u32)>>,
 }
 
 impl<'forced, I> ParseSubState<'forced, I>
@@ -194,9 +195,7 @@ where
         Some(ParsingResult {
             build_target: self.build_target,
             mod_name: self.mod_name,
-            mod_version: self
-                .mod_version
-                .unwrap_or_else(|| FALLBACK_MOD_VERSION.into()),
+            mod_version: self.mod_version.unwrap_or(FALLBACK_MOD_VERSION),
             target_build: self.target_build.map(|(bid, _)| bid)?,
             user_settings: self.user_settings,
             forced_output_format: self.forced_output_format.map(|(fmt, _)| fmt),
@@ -585,7 +584,7 @@ where
     }
 }
 
-const FALLBACK_MOD_VERSION: &str = "0.1.0";
+const FALLBACK_MOD_VERSION: ArcStr = arcstr::literal!("0.1.0");
 
 #[derive(Debug, PartialEq, Eq, Hash, Diagnostic, Error)]
 pub enum ParseDiagnostic {

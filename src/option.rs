@@ -1,5 +1,6 @@
 use crate::preprocessor::MacroDefine;
 use crate::utils::closest_key;
+use arcstr::ArcStr;
 use json5_nodes::JsonNode;
 use miette::SourceOffset;
 use serde::{Deserialize, Serialize};
@@ -152,10 +153,10 @@ pub enum OptionParseError {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ModNameOption(pub Arc<str>);
+pub struct ModNameOption(pub ArcStr);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ModVersionOption(pub Arc<str>);
+pub struct ModVersionOption(pub ArcStr);
 
 pub type BuildId = u128;
 
@@ -179,7 +180,7 @@ pub struct UserSettingsOption(pub Vec<Vec<UserSetting>>);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserSetting {
-    pub name: Arc<str>,
+    pub name: ArcStr,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub defines: Vec<Arc<MacroDefine>>,
 }

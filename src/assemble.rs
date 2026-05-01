@@ -1,8 +1,8 @@
 use crate::output::PatchVec;
 use crate::parse::ParsedCode;
+use arcstr::ArcStr;
 use keystone::{Arch, Keystone, Mode, error_msg};
 use miette::{Diagnostic, SourceSpan};
-use std::sync::Arc;
 use thiserror::Error;
 
 pub struct Assembler {
@@ -19,7 +19,7 @@ impl Assembler {
     pub fn assemble(
         &self,
         code: impl IntoIterator<Item = (u32, ParsedCode)>,
-        labels: impl IntoIterator<Item = (Arc<str>, u32)>,
+        labels: impl IntoIterator<Item = (ArcStr, u32)>,
         mut record_diagnostic: impl FnMut(AssembleDiagnostic),
     ) -> PatchVec {
         let mut generated_asm: String = labels

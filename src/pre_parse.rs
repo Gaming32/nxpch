@@ -1,6 +1,7 @@
 use crate::option::{NxpchOption, OptionParseError};
 use crate::preprocessor::{PreprocessorDiagnostic, PreprocessorDirective};
 use crate::utils::json5_error_to_offset;
+use arcstr::ArcStr;
 use miette::{Diagnostic, SourceOffset, SourceSpan};
 use std::ops::Range;
 use std::sync::Arc;
@@ -17,7 +18,7 @@ pub struct PreParsedCode {
 pub enum PreParsedStatement {
     Option(Arc<NxpchOption>, SourceSpan),
     Preprocessor(PreprocessorDirective),
-    Code(Arc<str>, SourceSpan),
+    Code(ArcStr, SourceSpan),
 }
 
 impl PreParsedCode {
