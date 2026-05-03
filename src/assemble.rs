@@ -38,7 +38,10 @@ impl Assembler {
                 ParsedCode::Long(long) => result.put(address, long.to_le_bytes()),
                 ParsedCode::Float(float) => result.put(address, float.to_le_bytes()),
                 ParsedCode::Double(double) => result.put(address, double.to_le_bytes()),
-                ParsedCode::String(string) => result.put(address, string.bytes()),
+                ParsedCode::String(string) => {
+                    result.put(address, string.bytes());
+                    result.put_byte(address + string.len() as u32, 0);
+                },
                 ParsedCode::Asm(asm, code_address, source_span) => {
                     generated_asm.push_str(&asm);
                     asm_lines.push((asm, source_span));
