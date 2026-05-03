@@ -30,7 +30,7 @@ pub struct ParsingResult {
     pub forced_output_format: Option<OutputFormat>,
     pub user_settings: SettingsVec,
     pub code: Arc<Vec<ParsedCode>>,
-    pub labels: Vec<(ArcStr, u32)>,
+    pub labels: Vec<(ArcStr, CodeAddress)>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -92,8 +92,7 @@ where
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ParsedCode {
     pub line_span: SourceSpan,
-    pub unshifted_address: u32,
-    pub address: u32,
+    pub address: CodeAddress,
     pub instruction: ParsedCodeInstruction,
     pub instruction_span: SourceSpan,
 }
@@ -107,7 +106,39 @@ pub enum ParsedCodeInstruction {
     Float(OrderedFloat<f32>),
     Double(OrderedFloat<f64>),
     String(ArcStr),
-    Asm(ArcStr, u64),
+    Asm(ArcStr),
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CodeAddress(u32);
+
+impl CodeAddress {
+    pub const NSO_HEADER_LEN: u32 = 0x100;
+    pub const MAX_ALLOWED_ADDR: u32 = u32::MAX - Self::NSO_HEADER_LEN;
+
+    pub fn new(addr: u32) -> Option<Self> {
+        if addr <= Self::MAX_ALLOWED_ADDR {
+            Some(Self(addr))
+        } else {
+            None
+        }
+    }
+
+    pub fn code_address(self) -> u32 {
+        self.0
+    }
+
+    pub fn nso_address(self) -> u32 {
+        self.0 + Self::NSO_HEADER_LEN
+    }
+
+    pub fn increment(self, other: u32) -> Option<Self> {
+        self.0.checked_add(other).and_then(Self::new)
+    }
+
+    pub fn remaining_bytes(self) -> u32 {
+        Self::MAX_ALLOWED_ADDR - self.0 + 1
+    }
 }
 
 #[derive(Clone)]
@@ -152,14 +183,13 @@ struct ParseSubState<'forced, I> {
     mod_name: Option<ArcStr>,
     mod_version: Option<ArcStr>,
     target_build: Option<(BuildId, SourceSpan)>,
-    pointer_offset: i32,
     user_settings: SettingsVec,
     forced_output_format: Option<(OutputFormat, SourceSpan)>,
 
     code_output: Arc<Vec<ParsedCode>>,
-    code_multi: Option<u32>,
+    code_multi: Option<CodeAddress>,
     code_multi_ended: Option<SourceOffset>,
-    code_labels: Arc<HashMap<ArcStr, (SourceSpan, u32)>>,
+    code_labels: Arc<HashMap<ArcStr, (SourceSpan, CodeAddress)>>,
 }
 
 impl<'forced, I> ParseSubState<'forced, I>
@@ -175,7 +205,6 @@ where
             mod_name: None,
             mod_version: None,
             target_build: None,
-            pointer_offset: 0,
             user_settings: Arc::new(vec![]),
             forced_output_format: None,
             code_output: Arc::new(vec![]),
@@ -282,10 +311,6 @@ where
                             },
                         );
                     }
-                    NxpchOption::PointerOffset(option) => {
-                        self.pointer_offset = option.0;
-                        self.end_multi_code(name_span.offset());
-                    }
                     NxpchOption::UserSettings(option) => {
                         let mut option = Cow::Borrowed(&option.0);
                         if let Some(forced) = self.forced.options.get(self.user_settings.len()..)
@@ -333,28 +358,26 @@ where
                     let target = target.trim_end();
                     let value = value.trim_start();
                     let is_origin = target == ".origin";
-                    let offset = if is_origin { value } else { target };
-                    let offset_span = (
-                        code_offsets[code.subslice_offset(offset).unwrap()],
-                        offset.len(),
+                    let address = if is_origin { value } else { target };
+                    let address_span = (
+                        code_offsets[code.subslice_offset(address).unwrap()],
+                        address.len(),
                     )
                         .into();
-                    let offset = match parse_int::parse::<u32>(offset) {
-                        Ok(offset) => offset,
+                    let offset = match parse_int::parse::<u32>(address) {
+                        Ok(address) => match CodeAddress::new(address) {
+                            Some(address) => address,
+                            None => {
+                                record_diagnostic(ParseDiagnostic::UnsupportedCodeAddress {
+                                    at: address_span,
+                                });
+                                return true;
+                            }
+                        },
                         Err(err) => {
-                            record_diagnostic(ParseDiagnostic::InvalidCodeOffset {
+                            record_diagnostic(ParseDiagnostic::InvalidCodeAddress {
                                 cause: err.to_string(),
-                                at: offset_span,
-                            });
-                            return true;
-                        }
-                    };
-                    let offset = match offset.checked_add_signed(self.pointer_offset) {
-                        Some(offset) => offset,
-                        None => {
-                            record_diagnostic(ParseDiagnostic::OverUnderFlow {
-                                pointer_offset: self.pointer_offset,
-                                at: offset_span,
+                                at: address_span,
                             });
                             return true;
                         }
@@ -371,17 +394,20 @@ where
                         );
                     }
                 } else if let Some(offset) = self.code_multi {
-                    self.code_multi = Some(self.parse_code(
+                    self.code_multi = self.parse_code(
                         code_span.offset(),
                         offset,
                         &code,
                         statement.line_span,
                         record_diagnostic,
-                    ));
+                    );
+                    if self.code_multi.is_none() {
+                        self.code_multi_ended = Some(statement.line_span.offset().into());
+                    }
                 } else {
                     record_diagnostic(ParseDiagnostic::NoOriginCode {
                         at: code_span,
-                        reset_from: self.code_multi_ended,
+                        cleared_from: self.code_multi_ended,
                     });
                 }
             }
@@ -456,11 +482,11 @@ where
     fn parse_code(
         &mut self,
         source_offset: usize,
-        offset: u32,
+        address: CodeAddress,
         code: &str,
         line_span: SourceSpan,
         mut record_diagnostic: impl FnMut(ParseDiagnostic),
-    ) -> u32 {
+    ) -> Option<CodeAddress> {
         if let Some(label_name) = code.strip_suffix(':') {
             let span = (source_offset, label_name.len()).into();
             if MacroDefine::NAME_REGEX.test(label_name) {
@@ -472,22 +498,21 @@ where
                         });
                     }
                     Entry::Vacant(entry) => {
-                        entry.insert((span, offset - 0x100));
+                        entry.insert((span, address));
                     }
                 }
             } else {
                 record_diagnostic(ParseDiagnostic::InvalidLabel { at: span });
             }
-            return offset;
+            return Some(address);
         }
-        let unshifted_address = offset.checked_sub_signed(self.pointer_offset).unwrap();
         let instruction_span = (source_offset, code.len()).into();
-        if let Some(directive) = code.strip_prefix('.') {
+        let (parsed_value, value_width) = if let Some(directive) = code.strip_prefix('.') {
             let Some((directive, value)) = directive.split_once(' ') else {
                 record_diagnostic(ParseDiagnostic::MissingDataValue {
                     at: (source_offset + directive.len()).into(),
                 });
-                return offset;
+                return Some(address);
             };
             let directive = directive.trim_end();
             let value = value.trim_start();
@@ -532,7 +557,7 @@ where
                     )
                 };
             }
-            let (parsed_value, value_width) = match directive {
+            match directive {
                 "byte" => parse_int!(Byte u8 i8),
                 "short" => parse_int!(Short u16 i16),
                 "int" => parse_int!(Int u32 i32),
@@ -565,26 +590,27 @@ where
                         ),
                         at: (source_offset, directive.len()).into(),
                     });
-                    return offset;
+                    return Some(address);
                 }
-            };
-            Arc::make_mut(&mut self.code_output).push(ParsedCode {
-                line_span,
-                unshifted_address,
-                address: offset,
-                instruction: parsed_value,
-                instruction_span,
+            }
+        } else {
+            (ParsedCodeInstruction::Asm(code.into()), 4)
+        };
+        if value_width > address.remaining_bytes() {
+            record_diagnostic(ParseDiagnostic::CodeOverflow {
+                bytes: value_width,
+                bytes_available: address.remaining_bytes(),
+                at: instruction_span,
             });
-            return offset + value_width;
+            return None;
         }
         Arc::make_mut(&mut self.code_output).push(ParsedCode {
-            unshifted_address,
-            address: offset,
-            instruction: ParsedCodeInstruction::Asm(code.into(), offset as u64 - 0x100),
+            address,
+            instruction: parsed_value,
             line_span,
             instruction_span,
         });
-        offset + 4
+        address.increment(value_width)
     }
 }
 
@@ -636,33 +662,49 @@ pub enum ParseDiagnostic {
     #[diagnostic(code(parse::missing_build_id))]
     MissingBuildId,
 
-    #[error("Invalid code offset")]
-    #[diagnostic(code(parse::invalid_code_offset))]
-    InvalidCodeOffset {
+    #[error(
+        "Addresses exceeding 0x{:X} are unsupported due to Atmosphère limitations",
+        CodeAddress::MAX_ALLOWED_ADDR
+    )]
+    #[diagnostic(code(parse::unsupported_code_address))]
+    UnsupportedCodeAddress {
+        #[label("Unsupported address")]
+        at: SourceSpan,
+    },
+
+    #[error("Invalid code address")]
+    #[diagnostic(code(parse::invalid_code_address))]
+    InvalidCodeAddress {
         cause: String,
 
         #[label("{cause}")]
         at: SourceSpan,
     },
 
-    #[error("Over/underflow from adding pointer_offset")]
-    #[diagnostic(code(parse::overflow))]
-    OverUnderFlow {
-        pointer_offset: i32,
+    #[error("Code is too big to fit in remaining patch space")]
+    #[diagnostic(code(parse::code_overflow))]
+    CodeOverflow {
+        bytes: u32,
+        bytes_available: u32,
 
-        #[label("Current pointer offset is 0x{pointer_offset:X}")]
+        #[label("Code takes {bytes} bytes, but only {bytes_available} are available to fill")]
         at: SourceSpan,
     },
 
     #[error("Code without = or .origin")]
-    #[diagnostic(code(parse::no_origin_code))]
+    #[diagnostic(
+        code(parse::no_origin_code),
+        help(
+            "The .origin may have been cleared by = code or by reaching the end of the allowed address space."
+        )
+    )]
     NoOriginCode {
         #[label(
             "Code must either be specified like \"0xDEADBEEF = code\", or it must have a .origin preceding it"
         )]
         at: SourceSpan,
-        #[label(".origin was reset due to this line")]
-        reset_from: Option<SourceOffset>,
+        #[label(".origin was cleared due to this line")]
+        cleared_from: Option<SourceOffset>,
     },
 
     #[error("Duplicate label declaration")]

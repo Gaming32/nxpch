@@ -92,6 +92,7 @@ pub fn pchtxt_to_nxpch(pchtxt: &str) -> (String, Vec<PchtxtDianostic>) {
     let mut output = String::new();
     let mut diags = vec![];
     let mut status = Status::PreEnabled;
+    let mut offset_shift = 0;
     let mut capstone = None;
     for line in PchtxtParseIter::new(pchtxt) {
         if let Some(diag) = line.diag {
@@ -136,12 +137,7 @@ pub fn pchtxt_to_nxpch(pchtxt: &str) -> (String, Vec<PchtxtDianostic>) {
                 }
             }
             PchtxtLineData::Flag(PchtxtFlag::OffsetShift(shift)) => {
-                if status == Status::Disabled {
-                    diags.push(PchtxtDianostic::DisabledPointerOffset {
-                        at: (line.line_start, line.line.len()).into(),
-                    });
-                }
-                let _ = write!(output, "pointer_offset = 0x{shift:X}");
+                offset_shift = shift;
             }
             PchtxtLineData::Disable => {
                 if status != Status::Disabled {
@@ -161,6 +157,23 @@ pub fn pchtxt_to_nxpch(pchtxt: &str) -> (String, Vec<PchtxtDianostic>) {
                     output.push_str("#if 0\n");
                     status = Status::Disabled;
                 }
+                let offset = offset.checked_add_signed(offset_shift).unwrap_or_else(|| {
+                    diags.push(PchtxtDianostic::OverUnderFlow {
+                        offset_shift,
+                        at: (line.line_start, 8).into(),
+                    });
+                    offset.wrapping_add_signed(offset_shift)
+                });
+                let offset = match offset.checked_sub(0x100) {
+                    Some(offset) => offset,
+                    None => {
+                        diags.push(PchtxtDianostic::HeaderAddress {
+                            computed_address: offset,
+                            at: (line.line_start, 8).into(),
+                        });
+                        continue;
+                    }
+                };
                 if patch.is_empty() {
                     let _ = write!(output, "// 0x{offset:08X} = ");
                 } else if is_string {
@@ -298,23 +311,6 @@ pub enum PchtxtDianostic {
         at: SourceSpan,
     },
 
-    #[error(
-        "offset_shift used after explicit @disabled or after a patch without an explicit @enabled"
-    )]
-    #[diagnostic(
-        code(pchtxt::disabled_offset_shift),
-        severity(warn),
-        help(
-            "This may cause issues with nxpch, as this will put the pointer_offset in \
-            preprocessor-disabled code, which will make the offset not apply in nxpch, while it \
-            still does in pchtxt."
-        )
-    )]
-    DisabledPointerOffset {
-        #[label]
-        at: SourceSpan,
-    },
-
     #[error("Missing @nsobid")]
     #[diagnostic(code(pchtxt::missing_bid))]
     MissingBuildId,
@@ -336,13 +332,22 @@ pub enum PchtxtDianostic {
         at: SourceSpan,
     },
 
-    #[error("Invalid offset")]
-    #[diagnostic(code(pchtxt::invalid_offset))]
-    InvalidOffset {
+    #[error("Invalid address")]
+    #[diagnostic(code(pchtxt::invalid_address))]
+    InvalidAddress {
         #[source]
         cause: ParseIntError,
 
         #[label("{cause}")]
+        at: SourceSpan,
+    },
+
+    #[error("Address lies within the header portion")]
+    #[diagnostic(code(pchtxt::header_address))]
+    HeaderAddress {
+        computed_address: u32,
+
+        #[label("The address 0x{computed_address:X} is less than 0x100")]
         at: SourceSpan,
     },
 
@@ -506,7 +511,7 @@ impl<'a> Iterator for PchtxtParseIter<'a> {
                 let offset = match u32::from_str_radix(&line[..8], 16) {
                     Ok(off) => off,
                     Err(err) => {
-                        diag = Some(PchtxtDianostic::InvalidOffset {
+                        diag = Some(PchtxtDianostic::InvalidAddress {
                             cause: err,
                             at: (line_start, 8).into(),
                         });

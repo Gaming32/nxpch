@@ -3,8 +3,6 @@
 mod_name = "Everything Hurts 2"
 mod_version = "1.0.1"
 
-pointer_offset = 0x100
-
 target_build = 0xF18FF3CFCBAD0884D72ABBEB6C540D6B
 
 user_settings = [
@@ -55,8 +53,8 @@ user_settings = [
 0x004DE190 = nop
 // Game::Player::calcDamage
 0x0088CEBC = ldr w0, [x19, 0x358] // Game::Player->int mIsControlled
-0x0088CEC0 = cbz w0, 0xc
-0x0088CEC8 = b 0xc
+0x0088CEC0 = cbz w0, 0x88cecc
+0x0088CEC8 = b 0x88ced4
 0x0088CECC = mov w0, MAX_HEALTH
 0x0088CED4 = mov w0, 1000
 // Game::SeqMgrMission::receiveCheckPoint_

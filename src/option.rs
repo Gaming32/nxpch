@@ -13,7 +13,6 @@ pub enum NxpchOption {
     ModVersion(ModVersionOption),
     TargetBuild(TargetBuildOption),
     TargetBuilds(TargetBuildsOption),
-    PointerOffset(PointerOffsetOption),
     UserSettings(UserSettingsOption),
     OutputFormat(OutputFormatOption),
 }
@@ -25,7 +24,6 @@ impl NxpchOption {
             "mod_version" => NxpchOption::ModVersion(json5::from_str(content)?),
             "target_build" => NxpchOption::TargetBuild(json5::from_str(content)?),
             "target_builds" => NxpchOption::TargetBuilds(json5::from_str(content)?),
-            "pointer_offset" => NxpchOption::PointerOffset(json5::from_str(content)?),
             "user_settings" => NxpchOption::UserSettings(json5::from_str(content)?),
             "output_format" => NxpchOption::OutputFormat(json5::from_str(content)?),
             _ => {
@@ -33,9 +31,10 @@ impl NxpchOption {
                     closest: closest_key(
                         option_name,
                         [
+                            "mod_name",
+                            "mod_version",
                             "target_build",
                             "target_builds",
-                            "pointer_offset",
                             "user_settings",
                             "output_format",
                         ],
@@ -92,7 +91,6 @@ impl NxpchOption {
                     }
                 }
             }
-            Self::PointerOffset(_) => {}
             Self::UserSettings(settings) => {
                 let nodes = match json5_nodes::parse(json) {
                     Ok(JsonNode::Array(root, _)) => root,
@@ -171,9 +169,6 @@ pub struct TargetBuildMatrixEntry {
     pub id: BuildId,
     pub defines: Vec<Arc<MacroDefine>>,
 }
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct PointerOffsetOption(pub i32);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct UserSettingsOption(pub Vec<Vec<UserSetting>>);

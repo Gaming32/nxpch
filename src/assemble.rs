@@ -1,6 +1,6 @@
 use crate::option::BuildId;
 use crate::output::PatchVec;
-use crate::parse::{ParsedCode, ParsedCodeInstruction};
+use crate::parse::{CodeAddress, ParsedCode, ParsedCodeInstruction};
 use crate::utils::{EscapePchtxtStringChar, SpanExt};
 use arcstr::ArcStr;
 use keystone::{Arch, Keystone, Mode, error_msg};
@@ -23,12 +23,12 @@ impl Assembler {
     pub fn assemble(
         &self,
         code: impl IntoIterator<Item = ParsedCode>,
-        labels: impl IntoIterator<Item = (ArcStr, u32)>,
+        labels: impl IntoIterator<Item = (ArcStr, CodeAddress)>,
         mut record_diagnostic: impl FnMut(AssembleDiagnostic),
     ) -> PatchVec {
         let mut generated_asm: String = labels
             .into_iter()
-            .map(|(name, address)| format!("{name}={address}\n"))
+            .map(|(name, address)| format!("{name}={}\n", address.code_address()))
             .collect();
         let asm_prefix_len = generated_asm.len();
         let mut asm_lines = vec![];
@@ -42,28 +42,30 @@ impl Assembler {
         }) = code_iter.next()
         {
             use ParsedCodeInstruction as PCI;
+            let nso_address = address.nso_address();
             match instruction {
-                PCI::Byte(byte) => result.put_byte(address, byte),
-                PCI::Short(short) => result.put(address, short.to_le_bytes()),
-                PCI::Int(int) => result.put(address, int.to_le_bytes()),
-                PCI::Long(long) => result.put(address, long.to_le_bytes()),
-                PCI::Float(float) => result.put(address, float.to_le_bytes()),
-                PCI::Double(double) => result.put(address, double.to_le_bytes()),
+                PCI::Byte(byte) => result.put_byte(nso_address, byte),
+                PCI::Short(short) => result.put(nso_address, short.to_le_bytes()),
+                PCI::Int(int) => result.put(nso_address, int.to_le_bytes()),
+                PCI::Long(long) => result.put(nso_address, long.to_le_bytes()),
+                PCI::Float(float) => result.put(nso_address, float.to_le_bytes()),
+                PCI::Double(double) => result.put(nso_address, double.to_le_bytes()),
                 PCI::String(string) => {
-                    result.put(address, string.bytes());
-                    result.put_byte(address + string.len() as u32, 0);
+                    result.put(nso_address, string.bytes());
+                    result.put_byte(nso_address + string.len() as u32, 0);
                 }
-                PCI::Asm(asm, code_address) => {
+                PCI::Asm(asm) => {
+                    let code_address = address.code_address();
                     generated_asm.push_str(&asm);
                     asm_lines.push((asm, instruction_span));
                     while let Some((asm, instruction_span)) = code_iter.next_if_map(|x| match x {
                         ParsedCode {
                             address: next_address,
-                            instruction: PCI::Asm(next_asm, next_code_address),
+                            instruction: PCI::Asm(next_asm),
                             instruction_span: next_instruction_span,
                             ..
-                        } if next_address == address + asm_lines.len() as u32 * 4
-                            && next_code_address == code_address + asm_lines.len() as u64 * 4 =>
+                        } if next_address.code_address()
+                            == code_address + asm_lines.len() as u32 * 4 =>
                         {
                             Ok((next_asm, next_instruction_span))
                         }
@@ -73,7 +75,10 @@ impl Assembler {
                         generated_asm.push_str(&asm);
                         asm_lines.push((asm, instruction_span));
                     }
-                    let asm = match self.keystone.asm(generated_asm.clone(), code_address) {
+                    let asm = match self
+                        .keystone
+                        .asm(generated_asm.clone(), code_address as u64)
+                    {
                         Ok(result) => result,
                         Err(err) if asm_lines.len() == 1 => {
                             record_diagnostic(AssembleDiagnostic::InvalidAsm {
@@ -91,11 +96,11 @@ impl Assembler {
                                 generated_asm.push_str(&line);
                                 match self.keystone.asm(
                                     generated_asm.clone(),
-                                    code_address + line_offset as u64 * 4,
+                                    (code_address + line_offset as u32 * 4) as u64,
                                 ) {
                                     Ok(asm) => {
-                                        assert_eq!(asm.size, 4);
-                                        result.put(address + line_offset as u32 * 4, asm.bytes)
+                                        assert_eq!(asm.size, 4, "{:?}", asm.bytes);
+                                        result.put(nso_address + line_offset as u32 * 4, asm.bytes)
                                     }
                                     Err(err) => {
                                         record_diagnostic(AssembleDiagnostic::InvalidAsm {
@@ -109,8 +114,8 @@ impl Assembler {
                             continue;
                         }
                     };
-                    assert_eq!(asm.size as usize, asm_lines.len() * 4);
-                    result.put(address, asm.bytes);
+                    assert_eq!(asm.size as usize, asm_lines.len() * 4, "{:?}", asm.bytes);
+                    result.put(nso_address, asm.bytes);
                     generated_asm.truncate(asm_prefix_len);
                     asm_lines.clear();
                 }
@@ -124,21 +129,21 @@ impl Assembler {
         original_source: &str,
         build_id: BuildId,
         code: impl IntoIterator<Item = ParsedCode>,
-        labels: impl IntoIterator<Item = (ArcStr, u32)>,
+        labels: impl IntoIterator<Item = (ArcStr, CodeAddress)>,
         mut output: impl Write,
         mut record_diagnostic: impl FnMut(AssembleDiagnostic),
     ) -> io::Result<()> {
         writeln!(output, "@nsobid-{build_id:032X}")?;
+        writeln!(output, "@flag offset_shift 0x100")?;
         writeln!(output, "@enabled")?;
         writeln!(output)?;
 
         let mut generated_asm: String = labels
             .into_iter()
-            .map(|(name, address)| format!("{name}={address}\n"))
+            .map(|(name, address)| format!("{name}={}\n", address.code_address()))
             .collect();
         let asm_prefix_len = generated_asm.len();
         let mut last_source_offset = 0;
-        let mut last_offset_shift = 0;
         for instruction in code {
             use ParsedCodeInstruction as PCI;
             for line in original_source[last_source_offset..instruction.line_span.offset()].lines()
@@ -149,12 +154,7 @@ impl Assembler {
                 }
                 writeln!(output, "// {line}")?;
             }
-            let offset_shift = instruction.address - instruction.unshifted_address;
-            if offset_shift != last_offset_shift {
-                last_offset_shift = offset_shift;
-                writeln!(output, "@flag offset_shift 0x{offset_shift:X}")?;
-            }
-            write!(output, "{:08X} ", instruction.unshifted_address)?;
+            write!(output, "{:08X} ", instruction.address.code_address())?;
             match instruction.instruction {
                 PCI::Byte(byte) => write!(output, "{byte:02X}")?,
                 // fmt formats as if BE, but the Switch uses LE, so we need to swap the bytes for correct formatting
@@ -170,11 +170,14 @@ impl Assembler {
                     }
                     output.write_all(b"\"")?;
                 }
-                PCI::Asm(asm, code_address) => {
+                PCI::Asm(asm) => {
                     generated_asm.push_str(&asm);
-                    match self.keystone.asm(generated_asm.clone(), code_address) {
+                    match self.keystone.asm(
+                        generated_asm.clone(),
+                        instruction.address.code_address() as u64,
+                    ) {
                         Ok(asm) => {
-                            assert_eq!(asm.size, 4);
+                            assert_eq!(asm.size, 4, "{:?}", asm.bytes);
                             for byte in asm.bytes {
                                 write!(output, "{byte:02X}")?;
                             }
