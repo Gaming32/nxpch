@@ -6,7 +6,7 @@ use crate::pchtxt::{pchtxt_to_nxpch, pchtxt_to_patches};
 use crate::pre_parse::PreParsedCode;
 use crate::preprocessor::MacroDefine;
 use crate::zip_gen::{PathSegment, generate_zip, generate_zip_filename};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use clap_stdin::{FileOrStdin, FileOrStdout};
 use miette::{
     Context, Diagnostic, GraphicalReportHandler, IntoDiagnostic, NamedSource, Severity, bail,
@@ -47,19 +47,8 @@ enum Commands {
         /// files would be generated. May be given a file path to output to.
         #[clap(short, long)]
         single: Option<Option<FileOrStdout>>,
-        /// Single build target to build for. If not specified, will build for both targets.
-        #[clap(short('T'), long)]
-        target: Option<BuildTarget>,
-        /// Set a value to a user_setting. This arg may be specified multiple times, and it must be
-        /// specified in the order of the options in the nxpch source, and the values must match
-        /// the names exactly as they are defined.
-        #[clap(short('S'), long)]
-        setting: Vec<String>,
-        /// An additional predefined macro in the form of -DMACRO_NAME or -D"MACRO_NAME expansion".
-        /// Note that this differs from the gcc syntax of -DMACRO_NAME=expansion. This may be
-        /// specified multiple times.
-        #[clap(short('D'), long)]
-        define: Vec<MacroDefine>,
+        #[command(flatten)]
+        params: CompileParams,
     },
     /// Convert a file from another format to nxpch
     #[clap(subcommand)]
@@ -96,6 +85,32 @@ enum PchtxtCommands {
         /// The output pchtxt file
         output: FileOrStdout,
     },
+    /// Generates a pchtxt file from a nxpch for debugging purposes
+    Generate {
+        /// The source nxpch file
+        source: FileOrStdin,
+        /// The output pchtxt file
+        output: FileOrStdout,
+        #[command(flatten)]
+        params: CompileParams,
+    },
+}
+
+#[derive(Args, Clone)]
+struct CompileParams {
+    /// Single build target to build for. If not specified, will build for both targets.
+    #[clap(short('T'), long)]
+    target: Option<BuildTarget>,
+    /// Set a value to a user_setting. This arg may be specified multiple times, and it must be
+    /// specified in the order of the options in the nxpch source, and the values must match
+    /// the names exactly as they are defined.
+    #[clap(short('S'), long)]
+    setting: Vec<String>,
+    /// An additional predefined macro in the form of -DMACRO_NAME or -D"MACRO_NAME expansion".
+    /// Note that this differs from the gcc syntax of -DMACRO_NAME=expansion. This may be
+    /// specified multiple times.
+    #[clap(short('D'), long)]
+    define: Vec<MacroDefine>,
 }
 
 fn main() -> miette::Result<()> {
@@ -105,70 +120,18 @@ fn main() -> miette::Result<()> {
         Commands::Build {
             source,
             single,
-            target,
-            setting,
-            define,
+            params,
         } => {
-            let (filename, source, pre_parsed_statements) = parse_source_code(source, |src| {
-                let parsed = PreParsedCode::parse(src);
-                (parsed.statements, parsed.diagnostics)
-            })?;
+            let (filename, source, emulator, hardware) = compile_in_memory(source, params)?;
 
-            let mut parse_diags = BTreeSet::new();
-            println!(
-                "Compiling nxpch file in memory with {} threads...",
-                rayon::current_num_threads(),
-            );
-            let generated_results = parse_statements(
-                pre_parsed_statements.into_iter().map(|(_, s)| s),
-                define,
-                target.map_or_else(
-                    || vec![BuildTarget::Emulator, BuildTarget::Hardware],
-                    |t| vec![t],
-                ),
-                ForcedBuildOption {
-                    build_id: None,
-                    options: setting,
-                },
-                |diag| {
-                    parse_diags.insert(diag);
-                },
-            );
-            check_error_count(print_diags(parse_diags, &filename, &source))?;
-
-            ensure!(!generated_results.is_empty(), "Code generated no output");
-
-            let (mut emulator, mut hardware): (Vec<_>, _) = generated_results
-                .into_iter()
-                .partition(|x| x.build_target == BuildTarget::Emulator);
             if let Some(single_path) = single {
-                fn generate_count_error(count: usize) -> miette::Result<()> {
-                    bail!(
-                        help = "Consider using --target, --build, and --setting to reduce output count.",
-                        "--single was used, but {count} outputs were generated (expected 1).",
-                    )
-                }
-                match (emulator.len(), hardware.len()) {
-                    (1, 1) => {
-                        hardware[0].build_target = BuildTarget::Emulator;
-                        if hardware[0] != emulator[0] {
-                            generate_count_error(2)?;
-                        }
-                        drop(hardware);
-                    }
-                    (1, 0) => {}
-                    (0, 1) => emulator = hardware,
-                    _ => return generate_count_error(emulator.len() + hardware.len()),
-                }
+                let to_build = narrow_to_single_output(emulator, hardware, "--single was used")?;
 
-                let to_build = emulator.into_iter().next().unwrap();
                 let mut compile_diags = vec![];
                 let built = Assembler::new().assemble(
                     Arc::try_unwrap(to_build.code).unwrap(),
                     to_build.labels,
-                    |diag| {
-                        compile_diags.push(diag);
-                    },
+                    |diag| compile_diags.push(diag),
                 );
                 check_error_count(print_diags(compile_diags, &filename, &source))?;
 
@@ -217,7 +180,7 @@ fn main() -> miette::Result<()> {
                         .with_context(|| format!("{WRITING_FILE}{STDOUT}"))?;
                 }
             } else {
-                println!("Generating zip files...");
+                eprintln!("Generating zip files...");
                 let fallback_filename = file_stem(&filename).unwrap_or("dotdot");
 
                 struct ZipGen {
@@ -313,7 +276,7 @@ fn main() -> miette::Result<()> {
                     temp.persist(&out_path)
                         .into_diagnostic()
                         .with_context(|| format!("{WRITING_FILE}{}", out_path.display()))?;
-                    println!("Wrote {}", out_path.display());
+                    eprintln!("Wrote {}", out_path.display());
                 }
             }
         }
@@ -340,8 +303,101 @@ fn main() -> miette::Result<()> {
                 .with_context(|| format!("{WRITING_FILE}{out_filename}"))?;
             eprintln!("Finished minifying to {out_filename}");
         }
+        Commands::Pchtxt(PchtxtCommands::Generate {
+            source,
+            output,
+            params,
+        }) => {
+            let (filename, source, emulator, hardware) = compile_in_memory(source, params)?;
+            let to_build = narrow_to_single_output(
+                emulator,
+                hardware,
+                "\"pchtxt generate\" can only work with one output",
+            )?;
+            let assembler = Assembler::new();
+            let (out_filename, output) = open_file_or_stdout(output)?;
+
+            let mut compile_diags = vec![];
+            assembler
+                .assemble_debug_pchtxt(
+                    &source,
+                    to_build.target_build,
+                    Arc::try_unwrap(to_build.code).unwrap(),
+                    to_build.labels,
+                    output,
+                    |diag| compile_diags.push(diag),
+                )
+                .into_diagnostic()
+                .with_context(|| format!("{WRITING_FILE}{out_filename}"))?;
+            check_error_count(print_diags(compile_diags, &filename, &source))?;
+        }
     }
     Ok(())
+}
+
+fn compile_in_memory(
+    source: FileOrStdin,
+    params: CompileParams,
+) -> miette::Result<(String, String, Vec<ParsingResult>, Vec<ParsingResult>)> {
+    let (filename, source, pre_parsed_statements) = parse_source_code(source, |src| {
+        let parsed = PreParsedCode::parse(src);
+        (parsed.statements, parsed.diagnostics)
+    })?;
+
+    let mut parse_diags = BTreeSet::new();
+    eprintln!(
+        "Compiling nxpch file in memory with {} threads...",
+        rayon::current_num_threads(),
+    );
+    let generated_results = parse_statements(
+        pre_parsed_statements,
+        params.define,
+        params.target.map_or_else(
+            || vec![BuildTarget::Emulator, BuildTarget::Hardware],
+            |t| vec![t],
+        ),
+        ForcedBuildOption {
+            build_id: None,
+            options: params.setting,
+        },
+        |diag| {
+            parse_diags.insert(diag);
+        },
+    );
+    check_error_count(print_diags(parse_diags, &filename, &source))?;
+
+    ensure!(!generated_results.is_empty(), "Code generated no output");
+
+    let (emulator, hardware): (Vec<_>, _) = generated_results
+        .into_iter()
+        .partition(|x| x.build_target == BuildTarget::Emulator);
+
+    Ok((filename, source, emulator, hardware))
+}
+
+fn narrow_to_single_output(
+    mut emulator: Vec<ParsingResult>,
+    mut hardware: Vec<ParsingResult>,
+    error_prefix: &str,
+) -> miette::Result<ParsingResult> {
+    let generate_count_error = |count| {
+        bail!(
+            help = "Consider using --target, --build, and --setting to reduce output count.",
+            "{error_prefix}, but {count} outputs were generated (expected 1).",
+        )
+    };
+    match (emulator.len(), hardware.len()) {
+        (1, 1) => {
+            hardware[0].build_target = BuildTarget::Emulator;
+            if hardware[0] != emulator[0] {
+                return generate_count_error(2);
+            }
+        }
+        (1, 0) => {}
+        (0, 1) => emulator = hardware,
+        _ => return generate_count_error(emulator.len() + hardware.len()),
+    }
+    Ok(emulator.into_iter().next().unwrap())
 }
 
 pub const STDIN: &str = "<stdin>";

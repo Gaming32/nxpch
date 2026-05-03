@@ -3,19 +3,24 @@ use crate::preprocessor::{PreprocessorDiagnostic, PreprocessorDirective};
 use crate::utils::json5_error_to_offset;
 use arcstr::ArcStr;
 use miette::{Diagnostic, SourceOffset, SourceSpan};
-use std::ops::Range;
 use std::sync::Arc;
 use subslice_offset::SubsliceOffset;
 use thiserror::Error;
 
 #[derive(Clone, Debug)]
 pub struct PreParsedCode {
-    pub statements: Vec<(Range<usize>, PreParsedStatement)>,
+    pub statements: Vec<PreParsedStatement>,
     pub diagnostics: Vec<PreParseDiagnostic>,
 }
 
 #[derive(Clone, Debug)]
-pub enum PreParsedStatement {
+pub struct PreParsedStatement {
+    pub line_span: SourceSpan,
+    pub content: PreParsedStatementContent,
+}
+
+#[derive(Clone, Debug)]
+pub enum PreParsedStatementContent {
     Option(Arc<NxpchOption>, SourceSpan),
     Preprocessor(PreprocessorDirective),
     Code(ArcStr, SourceSpan),
@@ -45,12 +50,11 @@ impl PreParsedCode {
                     Ok(mut option) => {
                         option.update_offsets(json_string, start_offset);
                         let statement_start = input.subslice_offset(current).unwrap();
-                        let statement_end =
-                            statement_start + full_match.len() + json_string.trim_end().len();
-                        statements.push((
-                            statement_start..statement_end,
-                            PreParsedStatement::Option(Arc::new(option), name_span),
-                        ));
+                        let statement_len = full_match.len() + json_string.trim_end().len();
+                        statements.push(PreParsedStatement {
+                            line_span: (statement_start, statement_len).into(),
+                            content: PreParsedStatementContent::Option(Arc::new(option), name_span),
+                        });
                     }
                     Err(OptionParseError::InvalidOption(err)) => {
                         diags.push(PreParseDiagnostic::InvalidOptionValue {
@@ -76,19 +80,22 @@ impl PreParsedCode {
                     diags.push(diag.into())
                 });
                 if let Some(directive) = directive {
-                    statements.push((
-                        start_offset..start_offset + line.len(),
-                        PreParsedStatement::Preprocessor(directive),
-                    ));
+                    statements.push(PreParsedStatement {
+                        line_span: (start_offset, line.len()).into(),
+                        content: PreParsedStatementContent::Preprocessor(directive),
+                    });
                 }
             } else if !current.is_empty() {
                 let (line, remaining) = find_up_to_comment(current);
                 current = remaining;
                 let start_offset = input.subslice_offset(line).unwrap();
-                statements.push((
-                    start_offset..start_offset + line.len(),
-                    PreParsedStatement::Code(line.into(), (start_offset, line.len()).into()),
-                ));
+                statements.push(PreParsedStatement {
+                    line_span: (start_offset, line.len()).into(),
+                    content: PreParsedStatementContent::Code(
+                        line.into(),
+                        (start_offset, line.len()).into(),
+                    ),
+                });
             }
         }
         Self {

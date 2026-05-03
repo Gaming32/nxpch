@@ -1,5 +1,5 @@
 use crate::option::BuildId;
-use crate::utils::all_but_last_assert;
+use crate::utils::{EscapePchtxtStringChar, all_but_last_assert};
 use itertools::Itertools;
 use miette::Diagnostic;
 use smallvec::{SmallVec, smallvec};
@@ -176,18 +176,7 @@ pub fn generate_pchtxt(
             if len_as_string.is_some() {
                 scratch.push('"');
                 for char in all_but_last_assert(str::from_utf8(sub_hunk).unwrap().chars(), '\0') {
-                    match char {
-                        '\x07' => scratch.push_str(r"\a"),
-                        '\x08' => scratch.push_str(r"\b"),
-                        '\x0C' => scratch.push_str(r"\f"),
-                        '\n' => scratch.push_str(r"\n"),
-                        '\r' => scratch.push_str(r"\r"),
-                        '\t' => scratch.push_str(r"\t"),
-                        '\x0B' => scratch.push_str(r"\v"),
-                        '\\' => scratch.push_str(r"\\"),
-                        '"' => scratch.push_str(r#"\""#),
-                        _ => scratch.push(char),
-                    }
+                    let _ = write!(scratch, "{}", EscapePchtxtStringChar(char));
                 }
                 scratch.push('"');
             } else {

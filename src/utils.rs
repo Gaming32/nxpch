@@ -1,7 +1,8 @@
-use miette::{Diagnostic, SourceOffset, SourceSpan};
+use miette::{ByteOffset, Diagnostic, SourceOffset, SourceSpan};
 use std::cmp::{Ordering, max};
-use std::fmt::Debug;
+use std::fmt::{Debug, Display, Formatter, Write};
 use std::mem;
+use std::ops::Range;
 use strsim::damerau_levenshtein;
 
 pub fn json5_error_to_offset(
@@ -114,6 +115,42 @@ pub fn order_diags_by_labels(diag: &impl Diagnostic, other: &impl Diagnostic) ->
         (Some(_), None) => Ordering::Greater,
         (None, Some(_)) => Ordering::Less,
         (None, None) => Ordering::Equal,
+    }
+}
+
+pub trait SpanExt {
+    fn to_range(self) -> Range<ByteOffset>;
+
+    fn end(&self) -> ByteOffset;
+}
+
+impl SpanExt for SourceSpan {
+    fn to_range(self) -> Range<usize> {
+        self.offset()..self.end()
+    }
+
+    fn end(&self) -> ByteOffset {
+        self.offset() + self.len()
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct EscapePchtxtStringChar(pub char);
+
+impl Display for EscapePchtxtStringChar {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            '\x07' => f.write_str(r"\a"),
+            '\x08' => f.write_str(r"\b"),
+            '\x0C' => f.write_str(r"\f"),
+            '\n' => f.write_str(r"\n"),
+            '\r' => f.write_str(r"\r"),
+            '\t' => f.write_str(r"\t"),
+            '\x0B' => f.write_str(r"\v"),
+            '\\' => f.write_str(r"\\"),
+            '"' => f.write_str(r#"\""#),
+            c => f.write_char(c),
+        }
     }
 }
 

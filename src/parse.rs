@@ -1,5 +1,5 @@
 use crate::option::{BuildId, NxpchOption, OutputFormat};
-use crate::pre_parse::PreParsedStatement;
+use crate::pre_parse::{PreParsedStatement, PreParsedStatementContent};
 use crate::preprocessor::{MacroDefine, PreprocessorDiagnostic, PreprocessorState};
 use crate::utils::{AsNum, closest_key, order_diags_by_labels};
 use arcstr::ArcStr;
@@ -29,7 +29,7 @@ pub struct ParsingResult {
     pub target_build: BuildId,
     pub forced_output_format: Option<OutputFormat>,
     pub user_settings: SettingsVec,
-    pub code: Arc<Vec<(u32, ParsedCode)>>,
+    pub code: Arc<Vec<ParsedCode>>,
     pub labels: Vec<(ArcStr, u32)>,
 }
 
@@ -90,7 +90,16 @@ where
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum ParsedCode {
+pub struct ParsedCode {
+    pub line_span: SourceSpan,
+    pub unshifted_address: u32,
+    pub address: u32,
+    pub instruction: ParsedCodeInstruction,
+    pub instruction_span: SourceSpan,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ParsedCodeInstruction {
     Byte(u8),
     Short(u16),
     Int(u32),
@@ -98,7 +107,7 @@ pub enum ParsedCode {
     Float(OrderedFloat<f32>),
     Double(OrderedFloat<f64>),
     String(ArcStr),
-    Asm(ArcStr, u64, SourceSpan),
+    Asm(ArcStr, u64),
 }
 
 #[derive(Clone)]
@@ -147,7 +156,7 @@ struct ParseSubState<'forced, I> {
     user_settings: SettingsVec,
     forced_output_format: Option<(OutputFormat, SourceSpan)>,
 
-    code_output: Arc<Vec<(u32, ParsedCode)>>,
+    code_output: Arc<Vec<ParsedCode>>,
     code_multi: Option<u32>,
     code_multi_ended: Option<SourceOffset>,
     code_labels: Arc<HashMap<ArcStr, (SourceSpan, u32)>>,
@@ -225,8 +234,8 @@ where
             }
             return false;
         };
-        match statement {
-            PreParsedStatement::Option(option, name_span) => {
+        match statement.content {
+            PreParsedStatementContent::Option(option, name_span) => {
                 if !self.preprocessor.active() {
                     return true;
                 }
@@ -305,10 +314,10 @@ where
                     },
                 }
             }
-            PreParsedStatement::Preprocessor(directive) => {
+            PreParsedStatementContent::Preprocessor(directive) => {
                 self.preprocessor.exec(directive, diag(record_diagnostic))
             }
-            PreParsedStatement::Code(code, code_span) => {
+            PreParsedStatementContent::Code(code, code_span) => {
                 if !self.preprocessor.active() {
                     return true;
                 }
@@ -357,12 +366,18 @@ where
                             code_offsets[code.subslice_offset(value).unwrap()],
                             offset,
                             value,
+                            statement.line_span,
                             record_diagnostic,
                         );
                     }
                 } else if let Some(offset) = self.code_multi {
-                    self.code_multi =
-                        Some(self.parse_code(code_span.offset(), offset, &code, record_diagnostic));
+                    self.code_multi = Some(self.parse_code(
+                        code_span.offset(),
+                        offset,
+                        &code,
+                        statement.line_span,
+                        record_diagnostic,
+                    ));
                 } else {
                     record_diagnostic(ParseDiagnostic::NoOriginCode {
                         at: code_span,
@@ -443,6 +458,7 @@ where
         source_offset: usize,
         offset: u32,
         code: &str,
+        line_span: SourceSpan,
         mut record_diagnostic: impl FnMut(ParseDiagnostic),
     ) -> u32 {
         if let Some(label_name) = code.strip_suffix(':') {
@@ -456,7 +472,7 @@ where
                         });
                     }
                     Entry::Vacant(entry) => {
-                        entry.insert((span, offset));
+                        entry.insert((span, offset - 0x100));
                     }
                 }
             } else {
@@ -464,6 +480,8 @@ where
             }
             return offset;
         }
+        let unshifted_address = offset.checked_sub_signed(self.pointer_offset).unwrap();
+        let instruction_span = (source_offset, code.len()).into();
         if let Some(directive) = code.strip_prefix('.') {
             let Some((directive, value)) = directive.split_once(' ') else {
                 record_diagnostic(ParseDiagnostic::MissingDataValue {
@@ -481,7 +499,7 @@ where
             macro_rules! parse_int {
                 ($variant:ident $unsigned:ident $signed:ident) => {
                     (
-                        ParsedCode::$variant(
+                        ParsedCodeInstruction::$variant(
                             match parse_maybe_signed::<$unsigned, $signed>(value) {
                                 Ok(value) => value,
                                 Err(err) => {
@@ -500,7 +518,7 @@ where
             macro_rules! parse_float {
                 ($variant:ident $bits:literal) => {
                     (
-                        ParsedCode::$variant(match parse_int::parse(value) {
+                        ParsedCodeInstruction::$variant(match parse_int::parse(value) {
                             Ok(value) => OrderedFloat(value),
                             Err(err) => {
                                 record_diagnostic(ParseDiagnostic::InvalidFloat {
@@ -537,7 +555,7 @@ where
                         }
                     };
                     let length = parsed.len();
-                    (ParsedCode::String(parsed.into()), length as u32)
+                    (ParsedCodeInstruction::String(parsed.into()), length as u32)
                 }
                 _ => {
                     record_diagnostic(ParseDiagnostic::UnknownDataDirective {
@@ -550,19 +568,22 @@ where
                     return offset;
                 }
             };
-            Arc::make_mut(&mut self.code_output).push((offset, parsed_value));
+            Arc::make_mut(&mut self.code_output).push(ParsedCode {
+                line_span,
+                unshifted_address,
+                address: offset,
+                instruction: parsed_value,
+                instruction_span,
+            });
             return offset + value_width;
         }
-        Arc::make_mut(&mut self.code_output).push((
-            offset,
-            ParsedCode::Asm(
-                code.into(),
-                (offset as u64)
-                    .checked_sub_signed(self.pointer_offset as i64)
-                    .unwrap(),
-                (source_offset, code.len()).into(),
-            ),
-        ));
+        Arc::make_mut(&mut self.code_output).push(ParsedCode {
+            unshifted_address,
+            address: offset,
+            instruction: ParsedCodeInstruction::Asm(code.into(), offset as u64 - 0x100),
+            line_span,
+            instruction_span,
+        });
         offset + 4
     }
 }
